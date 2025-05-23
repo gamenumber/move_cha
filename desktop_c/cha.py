@@ -161,7 +161,7 @@ class DesktopCharacter(QWidget):
         menu.exec_(position)
 
     def say_hello(self):
-        messages = ["안녕하세요! 😊", "좋은 하루에요! 🌟", "뭘 도와드릴까요? 🤔", "화이팅! 💪"]
+        messages = [ "저랑 놀아줄래요?" , "심심해요 ㅠㅠ "]
         message = random.choice(messages)
         bubble = SpeechBubble(message, self)
         self.bubbles.append(bubble)
@@ -206,9 +206,10 @@ class SpeechBubble(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        bubble_color = QColor(255, 230, 240, 240)
-        border_color = QColor(255, 182, 193)
-        shadow_color = QColor(0, 0, 0, 30)
+        bubble_color = QColor(240, 255, 245, 240)    # 화이트+민트 섞인 느낌 (배경)
+        border_color = QColor(152, 251, 152)         # Pale Green
+        shadow_color = QColor(34, 139, 34, 30)       # Forest Green 그림자
+
 
         painter.setBrush(shadow_color)
         painter.setPen(Qt.NoPen)
@@ -218,7 +219,8 @@ class SpeechBubble(QWidget):
         painter.setPen(border_color)
         painter.drawRoundedRect(10, 10, 160, 50, 15, 15)
 
-        painter.setPen(QColor(160, 60, 90))  # 글씨 색상 변경
+        painter.setPen(QColor(50, 90, 50))  
+
         font = QFont("Segoe Print", 11, QFont.Bold)
         if not QFont("Segoe Print").exactMatch():
             font = QFont("Arial Rounded MT Bold", 11, QFont.Bold)
