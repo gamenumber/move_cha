@@ -6,16 +6,14 @@ from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QMenu, QSystemTrayIco
 from PyQt5.QtCore import Qt, QTimer, QPoint
 from PyQt5.QtGui import QPixmap, QFont, QPainter, QColor, QTransform, QIcon
 
-# 윈도우 화면 꺼짐 방지 설정
 if platform.system() == "Windows":
     import ctypes
-    ctypes.windll.kernel32.SetThreadExecutionState(
-        0x80000002  # ES_CONTINUOUS | ES_DISPLAY_REQUIRED
-    )
+    ctypes.windll.kernel32.SetThreadExecutionState(0x80000002)
 
 class DesktopCharacter(QWidget):
     def __init__(self):
         super().__init__()
+        self.bubbles = []
         self.setup_window()
         self.load_character()
         self.setup_movement()
@@ -66,11 +64,9 @@ class DesktopCharacter(QWidget):
     def setup_interactions(self):
         self.setMouseTracking(True)
         self.drag_start_position = QPoint()
-
-        # 10초마다 자동으로 말풍선
         self.speech_timer = QTimer()
         self.speech_timer.timeout.connect(self.say_hello)
-        self.speech_timer.start(10000)  # 10초
+        self.speech_timer.start(10000)
 
     def wander_around(self):
         if not self.is_dragging and self.auto_move_enabled:
@@ -154,7 +150,7 @@ class DesktopCharacter(QWidget):
         hello_action = menu.addAction("안녕! 👋")
         hello_action.triggered.connect(self.say_hello)
         if self.auto_move_enabled:
-            pause_action = menu.addAction("멈춰! ⏸️")
+            pause_action = menu.addAction("멈추! ⏸️")
             pause_action.triggered.connect(self.pause_movement)
         else:
             resume_action = menu.addAction("다시 돌아다니기 ▶️")
@@ -167,8 +163,15 @@ class DesktopCharacter(QWidget):
     def say_hello(self):
         messages = ["안녕하세요! 😊", "좋은 하루에요! 🌟", "뭘 도와드릴까요? 🤔", "화이팅! 💪"]
         message = random.choice(messages)
-        bubble = SpeechBubble(message, self.pos())
+        bubble = SpeechBubble(message, self)
+        self.bubbles.append(bubble)
         bubble.show()
+        QTimer.singleShot(3000, lambda: self.remove_bubble(bubble))
+
+    def remove_bubble(self, bubble):
+        if bubble in self.bubbles:
+            self.bubbles.remove(bubble)
+        bubble.close()
 
     def pause_movement(self):
         self.auto_move_enabled = False
@@ -177,31 +180,50 @@ class DesktopCharacter(QWidget):
         self.auto_move_enabled = True
 
 class SpeechBubble(QWidget):
-    def __init__(self, message, char_pos):
+    def __init__(self, message, char_widget):
         super().__init__()
         self.message = message
-        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
+        self.char_widget = char_widget
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedSize(200, 80)
-        bubble_x = char_pos.x() + 160
-        bubble_y = char_pos.y() + 20
-        screen = QApplication.desktop().screenGeometry()
-        if bubble_x + 200 > screen.width():
-            bubble_x = char_pos.x() - 200
-        if bubble_y + 80 > screen.height():
-            bubble_y = char_pos.y() - 80
-        self.move(bubble_x, bubble_y)
-        QTimer.singleShot(3000, self.close)
+        self.setFixedSize(180, 60)
+        self.follow_timer = QTimer(self)
+        self.follow_timer.timeout.connect(self.follow_character)
+        self.follow_timer.start(30)
+        self.follow_character()
+
+    def follow_character(self):
+        char_pos = self.char_widget.pos()
+        bubble_x = char_pos.x() + (self.char_widget.width() // 2) - (self.width() // 2)
+        bubble_y_above = char_pos.y() - self.height() - 10
+        bubble_y_below = char_pos.y() + self.char_widget.height() + 10
+        if bubble_y_above <= 0:
+            self.move(bubble_x, bubble_y_below)
+        else:
+            self.move(bubble_x, bubble_y_above)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.setBrush(QColor(255, 255, 255, 200))
-        painter.setPen(QColor(100, 100, 100))
-        painter.drawRoundedRect(10, 10, 180, 60, 10, 10)
-        painter.setPen(QColor(0, 0, 0))
-        painter.setFont(QFont("Arial", 12))
-        painter.drawText(20, 20, 160, 40, Qt.AlignCenter | Qt.TextWordWrap, self.message)
+
+        bubble_color = QColor(255, 230, 240, 240)
+        border_color = QColor(255, 182, 193)
+        shadow_color = QColor(0, 0, 0, 30)
+
+        painter.setBrush(shadow_color)
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(12, 12, 160, 50, 15, 15)
+
+        painter.setBrush(bubble_color)
+        painter.setPen(border_color)
+        painter.drawRoundedRect(10, 10, 160, 50, 15, 15)
+
+        painter.setPen(QColor(160, 60, 90))  # 글씨 색상 변경
+        font = QFont("Segoe Print", 11, QFont.Bold)
+        if not QFont("Segoe Print").exactMatch():
+            font = QFont("Arial Rounded MT Bold", 11, QFont.Bold)
+        painter.setFont(font)
+        painter.drawText(15, 20, 150, 40, Qt.AlignCenter | Qt.TextWordWrap, self.message)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
