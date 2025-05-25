@@ -39,8 +39,11 @@ class DesktopCharacter(QWidget):
         self.label.setAlignment(Qt.AlignCenter)
         try:
             self.original_pixmap = QPixmap("character.png")
+            self.grabbed_pixmap = QPixmap("2.png")  # ✅ 잡힌 상태 이미지
+
             if not self.original_pixmap.isNull():
                 self.original_pixmap = self.original_pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.grabbed_pixmap = self.grabbed_pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation) if not self.grabbed_pixmap.isNull() else self.original_pixmap
                 self.label.setPixmap(self.original_pixmap)
                 self.has_image = True
                 self.facing_right = True
@@ -52,6 +55,7 @@ class DesktopCharacter(QWidget):
             self.label.setStyleSheet("color: black; background: transparent;")
             self.has_image = False
             self.facing_right = True
+
         self.label.setGeometry(15, 15, 120, 120)
 
     def setup_movement(self):
@@ -91,30 +95,43 @@ class DesktopCharacter(QWidget):
             should_face_right = self.speed_x > 0
             if should_face_right != self.facing_right:
                 self.facing_right = should_face_right
-                if self.facing_right:
-                    self.label.setPixmap(self.original_pixmap)
-                else:
-                    transform = QTransform()
-                    transform.scale(-1, 1)
-                    flipped_pixmap = self.original_pixmap.transformed(transform)
-                    self.label.setPixmap(flipped_pixmap)
-        else:
-            if self.speed_x > 0:
+                pixmap = self.original_pixmap
                 if not self.facing_right:
-                    self.label.setText("🐱")
-                    self.facing_right = True
-            else:
-                if self.facing_right:
-                    self.label.setText("🐾")
-                    self.facing_right = False
+                    transform = QTransform().scale(-1, 1)
+                    pixmap = pixmap.transformed(transform)
+                self.label.setPixmap(pixmap)
+        else:
+            self.label.setText("🐱" if self.speed_x > 0 else "🐾")
+            self.facing_right = self.speed_x > 0
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.is_dragging = True
             self.drag_start_position = event.globalPos() - self.frameGeometry().topLeft()
+            self.say_grabbed_message()
+
+            if self.has_image:
+                pixmap = self.grabbed_pixmap
+                if not self.facing_right:
+                    transform = QTransform().scale(-1, 1)
+                    pixmap = pixmap.transformed(transform)
+                self.label.setPixmap(pixmap)
+
             QTimer.singleShot(3000, self.end_drag)
         elif event.button() == Qt.RightButton:
             self.show_context_menu(event.globalPos())
+
+    def say_grabbed_message(self):
+        messages = [
+            "으아아악!",
+            "천천히 들어요",
+            "이거 놔요!"
+        ]
+        message = random.choice(messages)
+        bubble = SpeechBubble(message, self)
+        self.bubbles.append(bubble)
+        bubble.show()
+        QTimer.singleShot(3000, lambda: self.remove_bubble(bubble))
 
     def mouseMoveEvent(self, event):
         if event.buttons() == Qt.LeftButton and self.is_dragging:
@@ -130,7 +147,7 @@ class DesktopCharacter(QWidget):
         self.is_dragging = False
         self.speed_x = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
         self.speed_y = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
-        self.update_character_direction()
+        self.update_character_direction()  # ✅ 원래 이미지로 복구
 
     def show_context_menu(self, position):
         menu = QMenu(self)
@@ -161,7 +178,10 @@ class DesktopCharacter(QWidget):
         menu.exec_(position)
 
     def say_hello(self):
-        messages = [ "저랑 놀아줄래요?" , "심심해요 ㅠㅠ "]
+        messages = [
+            "저랑 놀아줄래요?",
+            "심심해요 ㅠㅠ"
+        ]
         message = random.choice(messages)
         bubble = SpeechBubble(message, self)
         self.bubbles.append(bubble)
@@ -206,10 +226,9 @@ class SpeechBubble(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        bubble_color = QColor(240, 255, 245, 240)    # 화이트+민트 섞인 느낌 (배경)
-        border_color = QColor(152, 251, 152)         # Pale Green
-        shadow_color = QColor(34, 139, 34, 30)       # Forest Green 그림자
-
+        bubble_color = QColor(240, 255, 245, 240)
+        border_color = QColor(152, 251, 152)
+        shadow_color = QColor(34, 139, 34, 30)
 
         painter.setBrush(shadow_color)
         painter.setPen(Qt.NoPen)
@@ -219,8 +238,7 @@ class SpeechBubble(QWidget):
         painter.setPen(border_color)
         painter.drawRoundedRect(10, 10, 160, 50, 15, 15)
 
-        painter.setPen(QColor(50, 90, 50))  
-
+        painter.setPen(QColor(50, 90, 50))
         font = QFont("Segoe Print", 11, QFont.Bold)
         if not QFont("Segoe Print").exactMatch():
             font = QFont("Arial Rounded MT Bold", 11, QFont.Bold)
