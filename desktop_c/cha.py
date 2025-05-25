@@ -39,7 +39,7 @@ class DesktopCharacter(QWidget):
         self.label.setAlignment(Qt.AlignCenter)
         try:
             self.original_pixmap = QPixmap("character.png")
-            self.grabbed_pixmap = QPixmap("2.png")  # ✅ 잡힌 상태 이미지
+            self.grabbed_pixmap = QPixmap("2.png")
 
             if not self.original_pixmap.isNull():
                 self.original_pixmap = self.original_pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -77,16 +77,20 @@ class DesktopCharacter(QWidget):
             current_pos = self.pos()
             new_x = current_pos.x() + self.speed_x
             new_y = current_pos.y() + self.speed_y
+
             if new_x <= 0 or new_x >= self.screen_width - self.char_width:
                 self.speed_x = -self.speed_x
                 new_x = max(0, min(self.screen_width - self.char_width, new_x))
             if new_y <= 0 or new_y >= self.screen_height - self.char_height:
                 self.speed_y = -self.speed_y
                 new_y = max(0, min(self.screen_height - self.char_height, new_y))
+
             self.update_character_direction()
+
             if random.random() < 0.03:
                 self.speed_x = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
                 self.speed_y = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
+
             self.move(int(new_x), int(new_y))
             self.raise_()
 
@@ -118,15 +122,12 @@ class DesktopCharacter(QWidget):
                 self.label.setPixmap(pixmap)
 
             QTimer.singleShot(3000, self.end_drag)
+
         elif event.button() == Qt.RightButton:
             self.show_context_menu(event.globalPos())
 
     def say_grabbed_message(self):
-        messages = [
-            "으아아악!",
-            "천천히 들어요",
-            "이거 놔요!"
-        ]
+        messages = ["으아아악!", "천천히 들어요", "이거 놔요!"]
         message = random.choice(messages)
         bubble = SpeechBubble(message, self)
         self.bubbles.append(bubble)
@@ -147,7 +148,15 @@ class DesktopCharacter(QWidget):
         self.is_dragging = False
         self.speed_x = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
         self.speed_y = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
-        self.update_character_direction()  # ✅ 원래 이미지로 복구
+
+        if self.has_image:
+            pixmap = self.original_pixmap
+            if not self.facing_right:
+                transform = QTransform().scale(-1, 1)
+                pixmap = pixmap.transformed(transform)
+            self.label.setPixmap(pixmap)
+
+        self.update_character_direction()
 
     def show_context_menu(self, position):
         menu = QMenu(self)
@@ -164,24 +173,25 @@ class DesktopCharacter(QWidget):
                 background-color: rgba(100, 150, 255, 100);
             }
         """)
+
         hello_action = menu.addAction("안녕! 👋")
         hello_action.triggered.connect(self.say_hello)
+
         if self.auto_move_enabled:
             pause_action = menu.addAction("멈추! ⏸️")
             pause_action.triggered.connect(self.pause_movement)
         else:
             resume_action = menu.addAction("다시 돌아다니기 ▶️")
             resume_action.triggered.connect(self.resume_movement)
+
         menu.addSeparator()
         quit_action = menu.addAction("종료 ❌")
         quit_action.triggered.connect(self.close)
+
         menu.exec_(position)
 
     def say_hello(self):
-        messages = [
-            "저랑 놀아줄래요?",
-            "심심해요 ㅠㅠ"
-        ]
+        messages = ["저랑 놀아줄래요?", "심심해요 ㅠㅠ"]
         message = random.choice(messages)
         bubble = SpeechBubble(message, self)
         self.bubbles.append(bubble)
@@ -258,6 +268,7 @@ if __name__ == "__main__":
             tray_icon.setIcon(QIcon("character.png"))
         except:
             tray_icon.setIcon(app.style().standardIcon(app.style().SP_ComputerIcon))
+
         tray_icon.setToolTip("데스크탑 캐릭터")
         tray_menu = QMenu()
         show_action = tray_menu.addAction("캐릭터 보이기")
