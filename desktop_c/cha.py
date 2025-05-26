@@ -14,6 +14,7 @@ class DesktopCharacter(QWidget):
     def __init__(self):
         super().__init__()
         self.bubbles = []
+        self.current_bubble = None
         self.setup_window()
         self.load_character()
         self.setup_movement()
@@ -39,8 +40,8 @@ class DesktopCharacter(QWidget):
         self.label.setAlignment(Qt.AlignCenter)
         try:
             self.original_pixmap = QPixmap("character.png")
-            self.grabbed_pixmap = QPixmap("2.png")
-            self.speaking_pixmap = QPixmap("3.png")
+            self.grabbed_pixmap = QPixmap("grab.png")
+            self.speaking_pixmap = QPixmap("h2.png")
 
             if not self.original_pixmap.isNull():
                 self.original_pixmap = self.original_pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -108,48 +109,128 @@ class DesktopCharacter(QWidget):
 
     def set_speaking_image(self):
         if self.has_image:
-            pixmap = self.speaking_pixmap
-            if not self.facing_right:
-                transform = QTransform().scale(-1, 1)
-                pixmap = pixmap.transformed(transform)
-            self.label.setPixmap(pixmap)
+            frames = []
+            for file in ["h1.png", "h2.png"]:
+                pixmap = QPixmap(file)
+                if not pixmap.isNull():
+                    pixmap = pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    if not self.facing_right:
+                        pixmap = pixmap.transformed(QTransform().scale(-1, 1))
+                    frames.append(pixmap)
+
+            if frames:
+                self.speaking_frames = frames
+                self.current_frame_index = 0
+                self.animation_timer = QTimer(self)
+                self.animation_timer.timeout.connect(self.animate_speaking)
+                self.animation_timer.start(180)
+            else:
+                self.set_static_speaking_image()
+        else:
+            self.label.setText("😺")
+
+    def animate_speaking(self):
+        if hasattr(self, "speaking_frames") and self.speaking_frames:
+            self.label.setPixmap(self.speaking_frames[self.current_frame_index])
+            self.current_frame_index = (self.current_frame_index + 1) % len(self.speaking_frames)
 
     def restore_image(self):
+        if hasattr(self, "animation_timer"):
+            self.animation_timer.stop()
+            self.animation_timer.deleteLater()
+            del self.animation_timer
+            if hasattr(self, "speaking_frames"):
+                del self.speaking_frames
+
         if self.has_image:
             pixmap = self.original_pixmap
             if not self.facing_right:
-                transform = QTransform().scale(-1, 1)
-                pixmap = pixmap.transformed(transform)
+                pixmap = pixmap.transformed(QTransform().scale(-1, 1))
             self.label.setPixmap(pixmap)
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.is_dragging = True
-            self.drag_start_position = event.globalPos() - self.frameGeometry().topLeft()
-            self.say_grabbed_message()
+    def stop_current_speech(self):
+        if hasattr(self, "animation_timer"):
+            self.animation_timer.stop()
+            self.animation_timer.deleteLater()
+            del self.animation_timer
+            if hasattr(self, "speaking_frames"):
+                del self.speaking_frames
 
-            if self.has_image:
-                pixmap = self.grabbed_pixmap
-                if not self.facing_right:
-                    transform = QTransform().scale(-1, 1)
-                    pixmap = pixmap.transformed(transform)
-                self.label.setPixmap(pixmap)
+        if self.current_bubble:
+            self.current_bubble.close()
+            self.current_bubble = None
 
-            QTimer.singleShot(3000, self.end_drag)
-
-        elif event.button() == Qt.RightButton:
-            self.show_context_menu(event.globalPos())
-
-    def say_grabbed_message(self):
-        messages = ["으아아악!", "천천히 들어요", "이거 놔요!"]
-        message = random.choice(messages)
+    def show_speech(self, message):
+        self.stop_current_speech()
         bubble = SpeechBubble(message, self)
+        self.current_bubble = bubble
         self.bubbles.append(bubble)
         bubble.show()
 
         self.set_speaking_image()
         QTimer.singleShot(3000, self.restore_image)
         QTimer.singleShot(3000, lambda: self.remove_bubble(bubble))
+
+    def remove_bubble(self, bubble):
+        if bubble in self.bubbles:
+            self.bubbles.remove(bubble)
+        bubble.close()
+        if self.current_bubble == bubble:
+            self.current_bubble = None
+
+    def say_hello(self):
+        if self.is_dragging:  # 드래그 중이면 무시
+            return
+        self.stop_current_speech()
+        messages = ["저랑 놀아줄래요?", "안녕하세요?"]
+        message = random.choice(messages)
+        self.show_speech(message)
+
+    def say_grabbed_message(self):
+        self.stop_current_speech()
+
+        messages = ["으아아악!", "이거 놔요!"]
+        message = random.choice(messages)
+
+        bubble = SpeechBubble(message, self)
+        self.current_bubble = bubble
+        self.bubbles.append(bubble)
+        bubble.show()
+
+        if self.has_image:
+            pixmap = self.grabbed_pixmap
+            if not self.facing_right:
+                pixmap = pixmap.transformed(QTransform().scale(-1, 1))
+            self.label.setPixmap(pixmap)
+
+
+    def pause_movement(self):
+        self.auto_move_enabled = False
+
+    def resume_movement(self):
+        self.auto_move_enabled = True
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.is_dragging = True
+            self.drag_start_position = event.globalPos() - self.frameGeometry().topLeft()
+
+            self.speech_timer.stop()  # 자동 인사 타이머 멈춤
+            self.say_grabbed_message()
+
+            if self.has_image:
+                pixmap = self.grabbed_pixmap
+                if not self.facing_right:
+                    pixmap = pixmap.transformed(QTransform().scale(-1, 1))
+                self.label.setPixmap(pixmap)
+
+        elif event.button() == Qt.RightButton:
+            self.show_context_menu(event.globalPos())
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.is_dragging:
+            self.end_drag()
+
 
     def mouseMoveEvent(self, event):
         if event.buttons() == Qt.LeftButton and self.is_dragging:
@@ -159,14 +240,24 @@ class DesktopCharacter(QWidget):
             self.move(new_x, new_y)
 
     def mouseDoubleClickEvent(self, event):
-        self.say_hello()
+        if not self.is_dragging:
+            self.say_hello()
 
     def end_drag(self):
         self.is_dragging = False
         self.speed_x = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
         self.speed_y = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
+
         self.restore_image()
         self.update_character_direction()
+
+        # 🟢 말풍선 제거도 여기서 수행
+        if self.current_bubble:
+            self.current_bubble.close()
+            self.current_bubble = None
+
+        self.speech_timer.start(10000)
+
 
     def show_context_menu(self, position):
         menu = QMenu(self)
@@ -199,28 +290,6 @@ class DesktopCharacter(QWidget):
         quit_action.triggered.connect(self.close)
 
         menu.exec_(position)
-
-    def say_hello(self):
-        messages = ["저랑 놀아줄래요?", "안녕하세요?"]
-        message = random.choice(messages)
-        bubble = SpeechBubble(message, self)
-        self.bubbles.append(bubble)
-        bubble.show()
-
-        self.set_speaking_image()
-        QTimer.singleShot(3000, self.restore_image)
-        QTimer.singleShot(3000, lambda: self.remove_bubble(bubble))
-
-    def remove_bubble(self, bubble):
-        if bubble in self.bubbles:
-            self.bubbles.remove(bubble)
-        bubble.close()
-
-    def pause_movement(self):
-        self.auto_move_enabled = False
-
-    def resume_movement(self):
-        self.auto_move_enabled = True
 
 class SpeechBubble(QWidget):
     def __init__(self, message, char_widget):
@@ -286,7 +355,7 @@ if __name__ == "__main__":
         tray_menu = QMenu()
         show_action = tray_menu.addAction("캐릭터 보이기")
         show_action.triggered.connect(character.show)
-        hide_action = tray_menu.addAction("캐릭터 숨기기")
+        hide_action = tray_menu.addAction("캐릭터 숨기")
         hide_action.triggered.connect(character.hide)
         tray_menu.addSeparator()
         quit_action = tray_menu.addAction("완전 종료")
