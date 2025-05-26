@@ -386,7 +386,7 @@ class DesktopCharacter(QWidget):
         if event.buttons() == Qt.LeftButton and self.is_dragging:
             new_pos = event.globalPos() - self.drag_start_position
             new_x = max(0, min(self.screen_width - self.char_width, new_pos.x()))
-            new_y = max(0, min(self.screen_height - self.char_height, new_y.y()))
+            new_y = max(0, min(self.screen_height - self.char_height, new_pos.y()))
             self.move(new_x, new_y)
 
     def mouseDoubleClickEvent(self, event):
