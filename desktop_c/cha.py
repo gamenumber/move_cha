@@ -40,10 +40,12 @@ class DesktopCharacter(QWidget):
         try:
             self.original_pixmap = QPixmap("character.png")
             self.grabbed_pixmap = QPixmap("2.png")
+            self.speaking_pixmap = QPixmap("3.png")
 
             if not self.original_pixmap.isNull():
                 self.original_pixmap = self.original_pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self.grabbed_pixmap = self.grabbed_pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation) if not self.grabbed_pixmap.isNull() else self.original_pixmap
+                self.speaking_pixmap = self.speaking_pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation) if not self.speaking_pixmap.isNull() else self.original_pixmap
                 self.label.setPixmap(self.original_pixmap)
                 self.has_image = True
                 self.facing_right = True
@@ -99,14 +101,26 @@ class DesktopCharacter(QWidget):
             should_face_right = self.speed_x > 0
             if should_face_right != self.facing_right:
                 self.facing_right = should_face_right
-                pixmap = self.original_pixmap
-                if not self.facing_right:
-                    transform = QTransform().scale(-1, 1)
-                    pixmap = pixmap.transformed(transform)
-                self.label.setPixmap(pixmap)
+                self.restore_image()
         else:
             self.label.setText("🐱" if self.speed_x > 0 else "🐾")
             self.facing_right = self.speed_x > 0
+
+    def set_speaking_image(self):
+        if self.has_image:
+            pixmap = self.speaking_pixmap
+            if not self.facing_right:
+                transform = QTransform().scale(-1, 1)
+                pixmap = pixmap.transformed(transform)
+            self.label.setPixmap(pixmap)
+
+    def restore_image(self):
+        if self.has_image:
+            pixmap = self.original_pixmap
+            if not self.facing_right:
+                transform = QTransform().scale(-1, 1)
+                pixmap = pixmap.transformed(transform)
+            self.label.setPixmap(pixmap)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -132,6 +146,9 @@ class DesktopCharacter(QWidget):
         bubble = SpeechBubble(message, self)
         self.bubbles.append(bubble)
         bubble.show()
+
+        self.set_speaking_image()
+        QTimer.singleShot(3000, self.restore_image)
         QTimer.singleShot(3000, lambda: self.remove_bubble(bubble))
 
     def mouseMoveEvent(self, event):
@@ -148,14 +165,7 @@ class DesktopCharacter(QWidget):
         self.is_dragging = False
         self.speed_x = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
         self.speed_y = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
-
-        if self.has_image:
-            pixmap = self.original_pixmap
-            if not self.facing_right:
-                transform = QTransform().scale(-1, 1)
-                pixmap = pixmap.transformed(transform)
-            self.label.setPixmap(pixmap)
-
+        self.restore_image()
         self.update_character_direction()
 
     def show_context_menu(self, position):
@@ -196,6 +206,9 @@ class DesktopCharacter(QWidget):
         bubble = SpeechBubble(message, self)
         self.bubbles.append(bubble)
         bubble.show()
+
+        self.set_speaking_image()
+        QTimer.singleShot(3000, self.restore_image)
         QTimer.singleShot(3000, lambda: self.remove_bubble(bubble))
 
     def remove_bubble(self, bubble):
