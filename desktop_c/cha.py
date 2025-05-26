@@ -201,7 +201,7 @@ class DesktopCharacter(QWidget):
         menu.exec_(position)
 
     def say_hello(self):
-        messages = ["저랑 놀아줄래요?", "심심해요 ㅠㅠ"]
+        messages = ["저랑 놀아줄래요?", "안녕하세요?"]
         message = random.choice(messages)
         bubble = SpeechBubble(message, self)
         self.bubbles.append(bubble)
