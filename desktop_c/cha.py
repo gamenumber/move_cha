@@ -41,6 +41,27 @@ class TTSHandler(QObject):
         else:
             print(f"[TTS 지원되지 않음] {text}")
     
+    def play_system_sound(self, sound_name="Glass"):
+        """macOS 시스템 효과음 재생"""
+        if not self.is_macos:
+            return
+            
+        def sound_worker():
+            try:
+                subprocess.run(["afplay", f"/System/Library/Sounds/{sound_name}.aiff"], check=True)
+            except subprocess.CalledProcessError:
+                # 기본 효과음이 없으면 다른 시스템 효과음 시도
+                try:
+                    subprocess.run(["afplay", "/System/Library/Sounds/Ping.aiff"], check=True)
+                except:
+                    pass
+            except Exception as e:
+                print(f"효과음 재생 오류: {e}")
+        
+        thread = threading.Thread(target=sound_worker)
+        thread.daemon = True
+        thread.start()
+    
     def speak_macos(self, text):
         """macOS에서 say 명령어로 TTS 실행"""
         def speak_worker():
@@ -313,7 +334,9 @@ class DesktopCharacter(QWidget):
         
         # ChatGPT를 통한 일반 대화
         if self.chatgpt_handler and self.chatgpt_handler.client:
-            self.show_speech_with_tts("음... 생각 중이에요")
+            # macOS 효과음 재생 (TTS 대신)
+            self.tts_handler.play_system_sound("Glass")  # 또는 "Ping", "Pop", "Purr" 등
+            self.show_speech("🤔")  # 간단한 이모티콘만 표시
             self.chatgpt_handler.get_response_async(text)
         else:
             default_responses = [
