@@ -8,9 +8,90 @@ from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QMenu, QSystemTrayIco
 from PyQt5.QtCore import Qt, QTimer, QPoint, pyqtSignal, QObject
 from PyQt5.QtGui import QPixmap, QFont, QPainter, QColor, QTransform, QIcon
 
+# OpenAI API 추가
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    print("OpenAI 라이브러리가 설치되지 않았습니다. 'pip install openai'로 설치해주세요.")
+
 if platform.system() == "Windows":
     import ctypes
     ctypes.windll.kernel32.SetThreadExecutionState(0x80000002)
+
+class ChatGPTHandler(QObject):
+    """ChatGPT API를 처리하는 클래스"""
+    response_ready = pyqtSignal(str)
+    
+    def __init__(self):
+        super().__init__()
+        self.client = None
+        self.setup_openai()
+        
+    def setup_openai(self):
+        """OpenAI API 설정"""
+        if not OPENAI_AVAILABLE:
+            return False
+            
+        # API 키 설정 (환경변수 또는 직접 입력)
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            # API 키가 환경변수에 없으면 사용자에게 안내
+            print("OpenAI API 키를 설정해주세요.")
+            print("방법 1: 환경변수 OPENAI_API_KEY 설정")
+            print("방법 2: 아래 코드에서 직접 입력")
+            # 직접 API 키를 입력하려면 아래 주석을 해제하고 키를 입력하세요
+            # api_key = "your-api-key-here"
+            return False
+            
+        try:
+            self.client = openai.OpenAI(api_key=api_key)
+            return True
+        except Exception as e:
+            print(f"OpenAI 클라이언트 초기화 실패: {e}")
+            return False
+    
+    def get_response(self, user_message):
+        """ChatGPT에게 질문하고 응답 받기"""
+        if not self.client:
+            return "죄송해요, ChatGPT 연결에 문제가 있어요."
+            
+        try:
+            # 캐릭터 성격 설정
+            system_prompt = """당신은 귀엽고 친근한 데스크탑 캐릭터입니다. 
+            사용자와 대화할 때 다음 특징을 가지세요:
+            - 친근하고 귀여운 말투 사용
+            - 간단하고 짧은 답변 (1-2문장)
+            - 이모티콘 적절히 사용
+            - 한국어로 대답
+            - 데스크탑에서 함께 지내는 친구 같은 느낌"""
+            
+            response = self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ],
+                max_tokens=100,
+                temperature=0.7
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            print(f"ChatGPT API 오류: {e}")
+            return "음... 지금은 잘 모르겠어요 😅"
+    
+    def get_response_async(self, user_message):
+        """비동기로 ChatGPT 응답 받기"""
+        def worker():
+            response = self.get_response(user_message)
+            self.response_ready.emit(response)
+        
+        thread = threading.Thread(target=worker)
+        thread.daemon = True
+        thread.start()
 
 class VoiceRecognizer(QObject):
     voice_command = pyqtSignal(str)
@@ -39,7 +120,7 @@ class VoiceRecognizer(QObject):
             try:
                 with self.microphone as source:
                     # 짧은 시간으로 설정해서 반응성 향상
-                    audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=3)
+                    audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=5)
                 
                 try:
                     # 한국어로 음성 인식
@@ -63,11 +144,11 @@ class DesktopCharacter(QWidget):
         super().__init__()
         self.bubbles = []
         self.current_bubble = None
-        self.scale_factor = 1.0  # 현재 크기 배율
-        self.base_char_width = 150  # 기본 캐릭터 크기
+        self.scale_factor = 1.0
+        self.base_char_width = 150
         self.base_char_height = 150
-        self.base_image_size = 120  # 기본 이미지 크기
-        self.base_bubble_width = 180  # 기본 말풍선 크기
+        self.base_image_size = 120
+        self.base_bubble_width = 180
         self.base_bubble_height = 60
         
         self.setup_window()
@@ -75,6 +156,15 @@ class DesktopCharacter(QWidget):
         self.setup_movement()
         self.setup_interactions()
         self.setup_voice_recognition()
+        self.setup_chatgpt()
+
+    def setup_chatgpt(self):
+        """ChatGPT 핸들러 설정"""
+        if OPENAI_AVAILABLE:
+            self.chatgpt_handler = ChatGPTHandler()
+            self.chatgpt_handler.response_ready.connect(self.handle_chatgpt_response)
+        else:
+            self.chatgpt_handler = None
 
     def setup_voice_recognition(self):
         """음성 인식 설정"""
@@ -89,14 +179,47 @@ class DesktopCharacter(QWidget):
 
     def handle_voice_command(self, text):
         """음성 명령 처리"""
-        text = text.lower()
+        text_lower = text.lower()
         
-        if "커" in text:
+        # 기존 크기 조절 명령
+        if "커" in text_lower or "크게" in text_lower:
             self.scale_up()
             self.show_speech("커졌어요! 😊")
-        elif "작" in text:
+            return
+        elif "작" in text_lower or "작게" in text_lower:
             self.scale_down()
             self.show_speech("작아졌어요! 😄")
+            return
+        elif "멈춰" in text_lower or "정지" in text_lower:
+            self.pause_movement()
+            self.show_speech("멈췄어요! ⏸️")
+            return
+        elif "움직여" in text_lower or "돌아다녀" in text_lower:
+            self.resume_movement()
+            self.show_speech("다시 움직일게요! 🏃‍♀️")
+            return
+        
+        # ChatGPT를 통한 일반 대화
+        if self.chatgpt_handler and self.chatgpt_handler.client:
+            # 사용자가 말하고 있다는 것을 표시
+            self.show_speech("음... 생각 중이에요 🤔")
+            # ChatGPT에게 질문
+            self.chatgpt_handler.get_response_async(text)
+        else:
+            # ChatGPT가 없을 때는 기본 응답
+            default_responses = [
+                "네, 알겠어요! 😊",
+                "흥미로운 이야기네요!",
+                "그렇군요! 😄",
+                "더 이야기해주세요!",
+                "재미있어요! ✨"
+            ]
+            response = random.choice(default_responses)
+            self.show_speech(response)
+
+    def handle_chatgpt_response(self, response):
+        """ChatGPT 응답 처리"""
+        self.show_speech(response)
 
     def scale_up(self):
         """캐릭터 크기 1.3배 증가"""
@@ -106,49 +229,40 @@ class DesktopCharacter(QWidget):
     def scale_down(self):
         """캐릭터 크기 1.3배 감소"""
         self.scale_factor /= 1.3
-        # 최소 크기 제한 (너무 작아지지 않도록)
         if self.scale_factor < 0.3:
             self.scale_factor = 0.3
         self.update_size()
 
     def update_size(self):
         """크기 업데이트"""
-        # 새로운 크기 계산
         new_width = int(self.base_char_width * self.scale_factor)
         new_height = int(self.base_char_height * self.scale_factor)
         new_image_size = int(self.base_image_size * self.scale_factor)
         
-        # 위젯 크기 변경
         self.char_width = new_width
         self.char_height = new_height
         self.setFixedSize(new_width, new_height)
         
-        # 현재 위치 조정 (화면 경계 체크)
         current_pos = self.pos()
         new_x = min(current_pos.x(), self.screen_width - new_width)
         new_y = min(current_pos.y(), self.screen_height - new_height)
         self.move(new_x, new_y)
         
-        # 라벨 크기와 위치 조정
         margin = (new_width - new_image_size) // 2
         self.label.setGeometry(margin, margin, new_image_size, new_image_size)
         
-        # 이미지 다시 로드
         self.reload_images_with_scale()
 
     def reload_images_with_scale(self):
         """스케일에 맞춰 이미지 다시 로드"""
         if not self.has_image:
-            # 텍스트 캐릭터인 경우 폰트 크기 조정
             font_size = int(36 * self.scale_factor)
             self.label.setFont(QFont("Arial", font_size))
             return
         
-        # 이미지 크기 계산
         new_image_size = int(self.base_image_size * self.scale_factor)
         
         try:
-            # 원본 이미지들 다시 로드
             if not self.original_pixmap.isNull():
                 self.original_pixmap = QPixmap("character.png").scaled(
                     new_image_size, new_image_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -165,7 +279,6 @@ class DesktopCharacter(QWidget):
             else:
                 self.speaking_pixmap = self.original_pixmap
             
-            # 현재 상태에 맞는 이미지 적용
             self.restore_image()
             
         except Exception as e:
@@ -224,7 +337,7 @@ class DesktopCharacter(QWidget):
         self.drag_start_position = QPoint()
         self.speech_timer = QTimer()
         self.speech_timer.timeout.connect(self.say_hello)
-        self.speech_timer.start(10000)
+        self.speech_timer.start(15000)  # 15초로 늘림 (대화가 많아질 수 있으므로)
 
     def wander_around(self):
         if not self.is_dragging and self.auto_move_enabled:
@@ -320,8 +433,8 @@ class DesktopCharacter(QWidget):
         bubble.show()
 
         self.set_speaking_image()
-        QTimer.singleShot(3000, self.restore_image)
-        QTimer.singleShot(3000, lambda: self.remove_bubble(bubble))
+        QTimer.singleShot(4000, self.restore_image)  # 4초로 늘림
+        QTimer.singleShot(4000, lambda: self.remove_bubble(bubble))
 
     def remove_bubble(self, bubble):
         if bubble in self.bubbles:
@@ -334,7 +447,7 @@ class DesktopCharacter(QWidget):
         if self.is_dragging:
             return
         self.stop_current_speech()
-        messages = ["저랑 놀아줄래요?", "안녕하세요?"]
+        messages = ["저랑 대화해볼래요? 🗣️", "뭔가 재미있는 이야기 없나요?", "안녕하세요! 😊"]
         message = random.choice(messages)
         self.show_speech(message)
 
@@ -406,7 +519,7 @@ class DesktopCharacter(QWidget):
             self.current_bubble = None
 
         self.speech_timer.start(10000)
-
+        
     def show_context_menu(self, position):
         menu = QMenu(self)
         menu.setStyleSheet("""
@@ -426,7 +539,6 @@ class DesktopCharacter(QWidget):
         hello_action = menu.addAction("안녕! 👋")
         hello_action.triggered.connect(self.say_hello)
 
-        # 크기 조절 메뉴 추가
         menu.addSeparator()
         bigger_action = menu.addAction("크게 만들기 🔍+")
         bigger_action.triggered.connect(self.scale_up)
@@ -441,6 +553,15 @@ class DesktopCharacter(QWidget):
         else:
             resume_action = menu.addAction("다시 돌아다니기 ▶️")
             resume_action.triggered.connect(self.resume_movement)
+
+        menu.addSeparator()
+        # ChatGPT 상태 표시
+        if self.chatgpt_handler and self.chatgpt_handler.client:
+            status_action = menu.addAction("🤖 ChatGPT 연결됨")
+            status_action.setEnabled(False)
+        else:
+            status_action = menu.addAction("❌ ChatGPT 연결 안됨")
+            status_action.setEnabled(False)
 
         menu.addSeparator()
         quit_action = menu.addAction("종료 ❌")
@@ -461,9 +582,20 @@ class SpeechBubble(QWidget):
         self.char_widget = char_widget
         self.scale_factor = scale_factor
         
-        # 스케일에 맞춰 말풍선 크기 조정
-        bubble_width = int(180 * scale_factor)
-        bubble_height = int(60 * scale_factor)
+        # 메시지 길이에 따라 말풍선 크기 동적 조정
+        base_width = 200
+        base_height = 70
+        
+        # 긴 메시지의 경우 크기 증가
+        if len(message) > 20:
+            base_width = 250
+            base_height = 90
+        if len(message) > 40:
+            base_width = 300
+            base_height = 110
+            
+        bubble_width = int(base_width * scale_factor)
+        bubble_height = int(base_height * scale_factor)
         
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -491,11 +623,11 @@ class SpeechBubble(QWidget):
         border_color = QColor(152, 251, 152)
         shadow_color = QColor(34, 139, 34, 30)
 
-        # 스케일에 맞춰 크기 조정
-        shadow_width = int(160 * self.scale_factor)
-        shadow_height = int(50 * self.scale_factor)
-        bubble_width = int(160 * self.scale_factor)
-        bubble_height = int(50 * self.scale_factor)
+        # 동적 크기 계산
+        shadow_width = self.width() - 20
+        shadow_height = self.height() - 20
+        bubble_width = self.width() - 20
+        bubble_height = self.height() - 20
         radius = int(15 * self.scale_factor)
         
         shadow_offset = int(12 * self.scale_factor)
@@ -510,32 +642,42 @@ class SpeechBubble(QWidget):
         painter.drawRoundedRect(bubble_offset, bubble_offset, bubble_width, bubble_height, radius, radius)
 
         painter.setPen(QColor(50, 90, 50))
-        font_size = int(11 * self.scale_factor)
+        font_size = max(9, int(11 * self.scale_factor))
         font = QFont("Segoe Print", font_size, QFont.Bold)
         if not QFont("Segoe Print").exactMatch():
-            font = QFont("Arial Rounded MT Bold", font_size, QFont.Bold)
+            font = QFont("Arial", font_size, QFont.Bold)
         painter.setFont(font)
         
         text_margin = int(15 * self.scale_factor)
-        text_y = int(20 * self.scale_factor)
-        text_width = int(150 * self.scale_factor)
-        text_height = int(40 * self.scale_factor)
+        text_rect = self.rect().adjusted(text_margin, text_margin, -text_margin, -text_margin)
         
-        painter.drawText(text_margin, text_y, text_width, text_height, 
-                        Qt.AlignCenter | Qt.TextWordWrap, self.message)
+        painter.drawText(text_rect, Qt.AlignCenter | Qt.TextWordWrap, self.message)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
-    # 음성 인식 라이브러리 확인
+    # 필요한 라이브러리 확인
     try:
         import speech_recognition as sr
-        print("음성 인식 라이브러리가 설치되어 있습니다.")
+        print("✅ 음성 인식 라이브러리가 설치되어 있습니다.")
     except ImportError:
-        print("speech_recognition 라이브러리를 설치해주세요: pip install SpeechRecognition")
-        print("또한 pyaudio도 필요합니다: pip install pyaudio")
+        print("❌ speech_recognition 라이브러리를 설치해주세요: pip install SpeechRecognition")
+        print("❌ 또한 pyaudio도 필요합니다: pip install pyaudio")
         sys.exit(1)
+
+    # OpenAI 라이브러리 상태 출력
+    if OPENAI_AVAILABLE:
+        print("✅ OpenAI 라이브러리가 설치되어 있습니다.")
+        api_key = os.getenv('OPENAI_API_KEY')
+        if api_key:
+            print("✅ OpenAI API 키가 설정되어 있습니다.")
+        else:
+            print("⚠️  OpenAI API 키가 설정되지 않았습니다.")
+            print("   환경변수 OPENAI_API_KEY를 설정하거나 코드에서 직접 입력하세요.")
+    else:
+        print("⚠️  OpenAI 라이브러리가 설치되지 않았습니다.")
+        print("   pip install openai 로 설치하면 ChatGPT 기능을 사용할 수 있습니다.")
 
     character = DesktopCharacter()
     character.show()
@@ -547,11 +689,11 @@ if __name__ == "__main__":
         except:
             tray_icon.setIcon(app.style().standardIcon(app.style().SP_ComputerIcon))
 
-        tray_icon.setToolTip("데스크탑 캐릭터")
+        tray_icon.setToolTip("데스크탑 캐릭터 (ChatGPT 대화 가능)")
         tray_menu = QMenu()
         show_action = tray_menu.addAction("캐릭터 보이기")
         show_action.triggered.connect(character.show)
-        hide_action = tray_menu.addAction("캐릭터 숨기")
+        hide_action = tray_menu.addAction("캐릭터 숨기기")
         hide_action.triggered.connect(character.hide)
         tray_menu.addSeparator()
         quit_action = tray_menu.addAction("완전 종료")
