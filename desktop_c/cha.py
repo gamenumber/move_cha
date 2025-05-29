@@ -5,9 +5,10 @@ import platform
 import threading
 import subprocess
 import speech_recognition as sr
+import math
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QMenu, QSystemTrayIcon
-from PyQt5.QtCore import Qt, QTimer, QPoint, pyqtSignal, QObject
-from PyQt5.QtGui import QPixmap, QFont, QPainter, QColor, QTransform, QIcon
+from PyQt5.QtCore import Qt, QTimer, QPoint, pyqtSignal, QObject, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
+from PyQt5.QtGui import QPixmap, QFont, QPainter, QColor, QTransform, QIcon, QPen, QBrush, QRadialGradient
 
 # OpenAI API 추가
 try:
@@ -20,6 +21,142 @@ except ImportError:
 if platform.system() == "Windows":
     import ctypes
     ctypes.windll.kernel32.SetThreadExecutionState(0x80000002)
+
+class WalkingEffect(QWidget):
+    """걸어다닐 때 나타나는 이펙트"""
+    
+    def __init__(self, x, y, effect_type="footprint"):
+        super().__init__()
+        self.effect_type = effect_type
+        self.opacity = 1.0
+        self.scale = 1.0
+        self.particles = []
+        
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        if effect_type == "footprint":
+            self.setFixedSize(30, 30)
+        elif effect_type == "dust":
+            self.setFixedSize(50, 50)
+            # 먼지 파티클 생성
+            for _ in range(8):
+                particle = {
+                    'x': random.randint(15, 35),
+                    'y': random.randint(15, 35),
+                    'size': random.randint(2, 5),
+                    'dx': random.uniform(-2, 2),
+                    'dy': random.uniform(-3, -1),
+                    'opacity': 1.0
+                }
+                self.particles.append(particle)
+        elif effect_type == "sparkle":
+            self.setFixedSize(40, 40)
+            # 반짝이 파티클 생성
+            for _ in range(6):
+                particle = {
+                    'x': random.randint(10, 30),
+                    'y': random.randint(10, 30),
+                    'size': random.randint(3, 8),
+                    'rotation': random.randint(0, 360),
+                    'opacity': 1.0
+                }
+                self.particles.append(particle)
+        
+        self.move(x - self.width()//2, y - self.height()//2)
+        
+        # 애니메이션 타이머
+        self.animation_timer = QTimer()
+        self.animation_timer.timeout.connect(self.update_effect)
+        self.animation_timer.start(50)
+        
+        # 자동 삭제 타이머
+        QTimer.singleShot(2000, self.deleteLater)
+        
+    def update_effect(self):
+        if self.effect_type == "footprint":
+            self.opacity -= 0.03
+            if self.opacity <= 0:
+                self.animation_timer.stop()
+                self.deleteLater()
+                return
+        elif self.effect_type == "dust":
+            # 먼지 파티클 업데이트
+            for particle in self.particles:
+                particle['x'] += particle['dx']
+                particle['y'] += particle['dy']
+                particle['dy'] += 0.1  # 중력 효과
+                particle['opacity'] -= 0.02
+            
+            # 사라진 파티클 제거
+            self.particles = [p for p in self.particles if p['opacity'] > 0]
+            if not self.particles:
+                self.animation_timer.stop()
+                self.deleteLater()
+                return
+        elif self.effect_type == "sparkle":
+            # 반짝이 효과 업데이트
+            for particle in self.particles:
+                particle['rotation'] += 10
+                particle['opacity'] -= 0.025
+            
+            self.particles = [p for p in self.particles if p['opacity'] > 0]
+            if not self.particles:
+                self.animation_timer.stop()
+                self.deleteLater()
+                return
+        
+        self.update()
+    
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        if self.effect_type == "footprint":
+            # 발자국 그리기
+            color = QColor(100, 100, 100, int(100 * self.opacity))
+            painter.setBrush(QBrush(color))
+            painter.setPen(Qt.NoPen)
+            
+            # 발가락 부분
+            for i in range(3):
+                x = 8 + i * 5
+                y = 5
+                painter.drawEllipse(x, y, 4, 6)
+            
+            # 발바닥 부분
+            painter.drawEllipse(5, 12, 20, 15)
+            
+        elif self.effect_type == "dust":
+            # 먼지 파티클 그리기
+            for particle in self.particles:
+                color = QColor(139, 119, 101, int(150 * particle['opacity']))
+                painter.setBrush(QBrush(color))
+                painter.setPen(Qt.NoPen)
+                painter.drawEllipse(
+                    int(particle['x'] - particle['size']/2),
+                    int(particle['y'] - particle['size']/2),
+                    particle['size'],
+                    particle['size']
+                )
+        
+        elif self.effect_type == "sparkle":
+            # 반짝이 효과 그리기
+            for particle in self.particles:
+                painter.save()
+                painter.translate(particle['x'], particle['y'])
+                painter.rotate(particle['rotation'])
+                
+                color = QColor(255, 215, 0, int(200 * particle['opacity']))
+                painter.setPen(QPen(color, 2))
+                
+                size = particle['size']
+                painter.drawLine(-size, 0, size, 0)
+                painter.drawLine(0, -size, 0, size)
+                painter.drawLine(-size*0.7, -size*0.7, size*0.7, size*0.7)
+                painter.drawLine(-size*0.7, size*0.7, size*0.7, -size*0.7)
+                
+                painter.restore()
 
 class TTSHandler(QObject):
     """macOS TTS를 처리하는 클래스"""
@@ -234,6 +371,16 @@ class DesktopCharacter(QWidget):
         self.base_bubble_width = 180
         self.base_bubble_height = 60
         
+        # 이펙트 관련 변수
+        self.walking_effects = []
+        self.last_effect_time = 0
+        self.effect_interval = 300  # 밀리초
+        self.current_effect_type = "footprint"  # footprint, dust, sparkle
+        
+        # 위치 추적을 위한 변수
+        self.last_x = 0
+        self.last_y = 0
+        
         self.setup_window()
         self.load_character()
         self.setup_movement()
@@ -331,6 +478,18 @@ class DesktopCharacter(QWidget):
             self.tts_handler.set_voice_speed(150)
             self.show_speech_with_tts("천천히 말할게요!")
             return
+        elif "발자국" in text_lower:
+            self.current_effect_type = "footprint"
+            self.show_speech_with_tts("발자국 이펙트로 바꿨어요!")
+            return
+        elif "먼지" in text_lower or "티끌" in text_lower:
+            self.current_effect_type = "dust"
+            self.show_speech_with_tts("먼지 이펙트로 바꿨어요!")
+            return
+        elif "반짝" in text_lower or "별" in text_lower:
+            self.current_effect_type = "sparkle"
+            self.show_speech_with_tts("반짝이 이펙트로 바꿨어요!")
+            return
         
         # ChatGPT를 통한 일반 대화
         if self.chatgpt_handler and self.chatgpt_handler.client:
@@ -352,6 +511,39 @@ class DesktopCharacter(QWidget):
     def handle_chatgpt_response(self, response):
         """ChatGPT 응답 처리"""
         self.show_speech_with_tts(response)
+
+    def create_walking_effect(self, x, y):
+        """걸을 때 이펙트 생성"""
+        current_time = QApplication.instance().tickCount() if hasattr(QApplication.instance(), 'tickCount') else 0
+        
+        # 시간 간격 확인 (너무 자주 생성되지 않도록)
+        import time
+        current_time = int(time.time() * 1000)
+        if current_time - self.last_effect_time < self.effect_interval:
+            return
+        
+        self.last_effect_time = current_time
+        
+        # 이동 거리 확인 (실제로 움직이고 있을 때만 이펙트 생성)
+        distance_moved = math.sqrt((x - self.last_x)**2 + (y - self.last_y)**2)
+        if distance_moved < 5:  # 최소 이동 거리
+            return
+        
+        # 이펙트 생성
+        effect = WalkingEffect(
+            x + self.width()//2, 
+            y + self.height() - 10,  # 발 위치
+            self.current_effect_type
+        )
+        effect.show()
+        self.walking_effects.append(effect)
+        
+        # 오래된 이펙트 정리
+        self.walking_effects = [e for e in self.walking_effects if e and not e.isHidden()]
+        
+        # 위치 업데이트
+        self.last_x = x
+        self.last_y = y
 
     def scale_up(self):
         """캐릭터 크기 1.3배 증가"""
@@ -428,6 +620,8 @@ class DesktopCharacter(QWidget):
         start_x = random.randint(0, self.screen_width - self.char_width)
         start_y = random.randint(0, self.screen_height - self.char_height)
         self.move(start_x, start_y)
+        self.last_x = start_x
+        self.last_y = start_y
         self.speed_x = random.choice([-3, -2, -1, 1, 2, 3])
         self.speed_y = random.choice([-3, -2, -1, 1, 2, 3])
 
@@ -490,6 +684,9 @@ class DesktopCharacter(QWidget):
                 self.speed_x = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
                 self.speed_y = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
 
+            # 걸을 때 이펙트 생성
+            self.create_walking_effect(new_x, new_y)
+            
             self.move(int(new_x), int(new_y))
             self.raise_()
 
@@ -658,9 +855,10 @@ class DesktopCharacter(QWidget):
                 background-color: rgba(255, 255, 255, 230);
                 border: 1px solid gray;
                 border-radius: 5px;
+                font-size: 12px;
             }
             QMenu::item {
-                padding: 5px 20px;
+                padding: 8px 20px;
             }
             QMenu::item:selected {
                 background-color: rgba(100, 150, 255, 100);
@@ -686,6 +884,16 @@ class DesktopCharacter(QWidget):
             resume_action.triggered.connect(self.resume_movement)
 
         menu.addSeparator()
+        # 이펙트 종류 선택
+        effect_menu = menu.addMenu("✨ 이펙트 선택")
+        footprint_action = effect_menu.addAction("👣 발자국")
+        footprint_action.triggered.connect(lambda: self.change_effect_type("footprint"))
+        dust_action = effect_menu.addAction("💨 먼지")
+        dust_action.triggered.connect(lambda: self.change_effect_type("dust"))
+        sparkle_action = effect_menu.addAction("⭐ 반짝이")
+        sparkle_action.triggered.connect(lambda: self.change_effect_type("sparkle"))
+
+        menu.addSeparator()
         if self.tts_handler.tts_enabled:
             tts_action = menu.addAction("🔊 소리 끄기")
             tts_action.triggered.connect(lambda: self.toggle_tts_and_notify())
@@ -703,6 +911,15 @@ class DesktopCharacter(QWidget):
         fast_action.triggered.connect(lambda: self.set_speech_speed(300))
 
         menu.addSeparator()
+        # 현재 이펙트 타입 표시
+        current_effect_text = {
+            "footprint": "👣 발자국",
+            "dust": "💨 먼지",
+            "sparkle": "⭐ 반짝이"
+        }
+        effect_status = menu.addAction(f"현재 이펙트: {current_effect_text[self.current_effect_type]}")
+        effect_status.setEnabled(False)
+        
         # ChatGPT 상태 표시
         if self.chatgpt_handler and self.chatgpt_handler.client:
             status_action = menu.addAction("🤖 ChatGPT 연결됨")
@@ -724,6 +941,16 @@ class DesktopCharacter(QWidget):
         quit_action.triggered.connect(self.close)
 
         menu.exec_(position)
+
+    def change_effect_type(self, effect_type):
+        """이펙트 타입 변경"""
+        self.current_effect_type = effect_type
+        effect_names = {
+            "footprint": "발자국 이펙트",
+            "dust": "먼지 이펙트", 
+            "sparkle": "반짝이 이펙트"
+        }
+        self.show_speech_with_tts(f"{effect_names[effect_type]}로 바꿨어요!")
 
     def toggle_tts_and_notify(self):
         """TTS 토글하고 알림"""
@@ -749,6 +976,13 @@ class DesktopCharacter(QWidget):
             self.voice_recognizer.stop_listening()
         if hasattr(self, 'tts_handler'):
             self.tts_handler.stop_speaking()
+        
+        # 모든 이펙트 정리
+        for effect in self.walking_effects:
+            if effect:
+                effect.close()
+        self.walking_effects.clear()
+        
         event.accept()
 
 class SpeechBubble(QWidget):
@@ -861,6 +1095,11 @@ if __name__ == "__main__":
         print("⚠️  OpenAI 라이브러리가 설치되지 않았습니다.")
         print("   pip install openai 로 설치하면 ChatGPT 기능을 사용할 수 있습니다.")
 
+    print("\n🎮 이펙트 기능:")
+    print("• 음성으로 '발자국', '먼지', '반짝' 등으로 이펙트 변경 가능")
+    print("• 우클릭 메뉴에서도 이펙트 선택 가능")
+    print("• 걸어다닐 때 이펙트 생성 (드래그 시에는 생성 안됨)")
+
     character = DesktopCharacter()
     character.show()
 
@@ -871,7 +1110,7 @@ if __name__ == "__main__":
         except:
             tray_icon.setIcon(app.style().standardIcon(app.style().SP_ComputerIcon))
 
-        tray_icon.setToolTip("데스크탑 캐릭터 (ChatGPT 대화 + TTS)")
+        tray_icon.setToolTip("데스크탑 캐릭터 (ChatGPT + TTS + 걸어다니기 이펙트)")
         tray_menu = QMenu()
         show_action = tray_menu.addAction("캐릭터 보이기")
         show_action.triggered.connect(character.show)
