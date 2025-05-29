@@ -3,6 +3,7 @@ import random
 import os
 import platform
 import threading
+import subprocess
 import speech_recognition as sr
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QMenu, QSystemTrayIcon
 from PyQt5.QtCore import Qt, QTimer, QPoint, pyqtSignal, QObject
@@ -20,6 +21,76 @@ if platform.system() == "Windows":
     import ctypes
     ctypes.windll.kernel32.SetThreadExecutionState(0x80000002)
 
+class TTSHandler(QObject):
+    """macOS TTS를 처리하는 클래스"""
+    
+    def __init__(self):
+        super().__init__()
+        self.is_macos = platform.system() == "Darwin"
+        self.tts_enabled = True
+        self.voice = "Yuna"  # 한국어 음성 (없으면 기본 음성 사용)
+        self.speech_rate = "200"  # 말하기 속도 (단어/분)
+        
+    def speak(self, text):
+        """텍스트를 음성으로 출력"""
+        if not self.tts_enabled:
+            return
+            
+        if self.is_macos:
+            self.speak_macos(text)
+        else:
+            print(f"[TTS 지원되지 않음] {text}")
+    
+    def speak_macos(self, text):
+        """macOS에서 say 명령어로 TTS 실행"""
+        def speak_worker():
+            try:
+                cmd = ["say"]
+                
+                # 한국어 음성 확인 및 사용
+                try:
+                    result = subprocess.run(["say", "-v", "?"], capture_output=True, text=True)
+                    if "Yuna" in result.stdout:
+                        cmd.extend(["-v", "Yuna"])
+                    elif "korean" in result.stdout.lower():
+                        for line in result.stdout.split('\n'):
+                            if 'korean' in line.lower():
+                                voice_name = line.split()[0]
+                                cmd.extend(["-v", voice_name])
+                                break
+                except:
+                    pass
+                
+                cmd.extend(["-r", self.speech_rate])
+                cmd.append(text)
+                subprocess.run(cmd, check=True)
+                
+            except subprocess.CalledProcessError as e:
+                print(f"TTS 실행 오류: {e}")
+            except Exception as e:
+                print(f"TTS 오류: {e}")
+        
+        thread = threading.Thread(target=speak_worker)
+        thread.daemon = True
+        thread.start()
+    
+    def stop_speaking(self):
+        """현재 진행 중인 TTS 중지"""
+        if self.is_macos:
+            try:
+                subprocess.run(["killall", "say"], check=False)
+            except:
+                pass
+    
+    def set_voice_speed(self, speed):
+        """말하기 속도 설정 (100-300 권장)"""
+        self.speech_rate = str(max(100, min(400, speed)))
+    
+    def toggle_tts(self):
+        """TTS 켜기/끄기"""
+        self.tts_enabled = not self.tts_enabled
+        return self.tts_enabled
+
 class ChatGPTHandler(QObject):
     """ChatGPT API를 처리하는 클래스"""
     response_ready = pyqtSignal(str)
@@ -34,15 +105,11 @@ class ChatGPTHandler(QObject):
         if not OPENAI_AVAILABLE:
             return False
             
-        # API 키 설정 (환경변수 또는 직접 입력)
         api_key = os.getenv('OPENAI_API_KEY')
         if not api_key:
-            # API 키가 환경변수에 없으면 사용자에게 안내
             print("OpenAI API 키를 설정해주세요.")
             print("방법 1: 환경변수 OPENAI_API_KEY 설정")
             print("방법 2: 아래 코드에서 직접 입력")
-            # 직접 API 키를 입력하려면 아래 주석을 해제하고 키를 입력하세요
-            # api_key = "your-api-key-here"
             return False
             
         try:
@@ -58,14 +125,14 @@ class ChatGPTHandler(QObject):
             return "죄송해요, ChatGPT 연결에 문제가 있어요."
             
         try:
-            # 캐릭터 성격 설정
             system_prompt = """당신은 귀엽고 친근한 데스크탑 캐릭터입니다. 
             사용자와 대화할 때 다음 특징을 가지세요:
             - 친근하고 귀여운 말투 사용
             - 간단하고 짧은 답변 (1-2문장)
             - 이모티콘 적절히 사용
             - 한국어로 대답
-            - 데스크탑에서 함께 지내는 친구 같은 느낌"""
+            - 데스크탑에서 함께 지내는 친구 같은 느낌
+            - TTS로 읽히기 때문에 너무 복잡한 기호나 이모티콘은 피하기"""
             
             response = self.client.chat.completions.create(
                 model="gpt-3.5-turbo",
@@ -81,7 +148,7 @@ class ChatGPTHandler(QObject):
             
         except Exception as e:
             print(f"ChatGPT API 오류: {e}")
-            return "음... 지금은 잘 모르겠어요 😅"
+            return "음... 지금은 잘 모르겠어요"
     
     def get_response_async(self, user_message):
         """비동기로 ChatGPT 응답 받기"""
@@ -102,7 +169,6 @@ class VoiceRecognizer(QObject):
         self.microphone = sr.Microphone()
         self.is_listening = False
         
-        # 마이크 조정
         with self.microphone as source:
             self.recognizer.adjust_for_ambient_noise(source)
     
@@ -119,22 +185,18 @@ class VoiceRecognizer(QObject):
         while self.is_listening:
             try:
                 with self.microphone as source:
-                    # 짧은 시간으로 설정해서 반응성 향상
                     audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=5)
                 
                 try:
-                    # 한국어로 음성 인식
                     text = self.recognizer.recognize_google(audio, language='ko-KR')
                     print(f"음성 인식 결과: {text}")
                     self.voice_command.emit(text)
                 except sr.UnknownValueError:
-                    # 인식 실패시 무시
                     pass
                 except sr.RequestError as e:
                     print(f"음성 인식 서비스 오류: {e}")
                     
             except sr.WaitTimeoutError:
-                # 타임아웃시 계속 진행
                 pass
             except Exception as e:
                 print(f"음성 인식 오류: {e}")
@@ -157,6 +219,15 @@ class DesktopCharacter(QWidget):
         self.setup_interactions()
         self.setup_voice_recognition()
         self.setup_chatgpt()
+        self.setup_tts()
+
+    def setup_tts(self):
+        """TTS 핸들러 설정"""
+        self.tts_handler = TTSHandler()
+        if self.tts_handler.is_macos:
+            print("✅ macOS TTS가 활성화되었습니다.")
+        else:
+            print("⚠️  macOS가 아니므로 TTS 기능이 제한됩니다.")
 
     def setup_chatgpt(self):
         """ChatGPT 핸들러 설정"""
@@ -177,49 +248,87 @@ class DesktopCharacter(QWidget):
             print(f"음성 인식 초기화 실패: {e}")
             self.voice_recognizer = None
 
+    def clean_text_for_tts(self, text):
+        """TTS에 적합하도록 텍스트 정리"""
+        # 기본 이모티콘들 제거
+        basic_emojis = ['😊', '😄', '😅', '🤔', '🗣️', '🏃‍♀️', '⏸️', '▶️', '🔍', '❌', '👋', '✨', '🔊', '🔇']
+        for emoji in basic_emojis:
+            text = text.replace(emoji, '')
+        
+        # 연속된 점들 정리
+        text = text.replace('...', '').replace('..', '')
+        
+        # 불필요한 공백 정리
+        text = ' '.join(text.split())
+        
+        # 앞뒤 공백 제거
+        text = text.strip()
+        
+        return text if text else ""
+
+    def show_speech_with_tts(self, message):
+        """말풍선과 함께 TTS로 음성 출력"""
+        self.tts_handler.stop_speaking()
+        self.show_speech(message)
+        
+        clean_message = self.clean_text_for_tts(message)
+        if clean_message:
+            self.tts_handler.speak(clean_message)
+
     def handle_voice_command(self, text):
         """음성 명령 처리"""
         text_lower = text.lower()
         
-        # 기존 크기 조절 명령
         if "커" in text_lower or "크게" in text_lower:
             self.scale_up()
-            self.show_speech("커졌어요! 😊")
+            self.show_speech_with_tts("커졌어요!")
             return
         elif "작" in text_lower or "작게" in text_lower:
             self.scale_down()
-            self.show_speech("작아졌어요! 😄")
+            self.show_speech_with_tts("작아졌어요!")
             return
         elif "멈춰" in text_lower or "정지" in text_lower:
             self.pause_movement()
-            self.show_speech("멈췄어요! ⏸️")
+            self.show_speech_with_tts("멈췄어요!")
             return
         elif "움직여" in text_lower or "돌아다녀" in text_lower:
             self.resume_movement()
-            self.show_speech("다시 움직일게요! 🏃‍♀️")
+            self.show_speech_with_tts("다시 움직일게요!")
+            return
+        elif "조용" in text_lower or "음소거" in text_lower:
+            tts_status = self.tts_handler.toggle_tts()
+            if tts_status:
+                self.show_speech("소리를 다시 켤게요! 🔊")
+            else:
+                self.show_speech("조용히 할게요! 🔇")
+            return
+        elif "빨리" in text_lower and "말해" in text_lower:
+            self.tts_handler.set_voice_speed(300)
+            self.show_speech_with_tts("빨리 말할게요!")
+            return
+        elif "천천히" in text_lower and "말해" in text_lower:
+            self.tts_handler.set_voice_speed(150)
+            self.show_speech_with_tts("천천히 말할게요!")
             return
         
         # ChatGPT를 통한 일반 대화
         if self.chatgpt_handler and self.chatgpt_handler.client:
-            # 사용자가 말하고 있다는 것을 표시
-            self.show_speech("음... 생각 중이에요 🤔")
-            # ChatGPT에게 질문
+            self.show_speech_with_tts("음... 생각 중이에요")
             self.chatgpt_handler.get_response_async(text)
         else:
-            # ChatGPT가 없을 때는 기본 응답
             default_responses = [
-                "네, 알겠어요! 😊",
+                "네, 알겠어요!",
                 "흥미로운 이야기네요!",
-                "그렇군요! 😄",
+                "그렇군요!",
                 "더 이야기해주세요!",
-                "재미있어요! ✨"
+                "재미있어요!"
             ]
             response = random.choice(default_responses)
-            self.show_speech(response)
+            self.show_speech_with_tts(response)
 
     def handle_chatgpt_response(self, response):
         """ChatGPT 응답 처리"""
-        self.show_speech(response)
+        self.show_speech_with_tts(response)
 
     def scale_up(self):
         """캐릭터 크기 1.3배 증가"""
@@ -337,7 +446,7 @@ class DesktopCharacter(QWidget):
         self.drag_start_position = QPoint()
         self.speech_timer = QTimer()
         self.speech_timer.timeout.connect(self.say_hello)
-        self.speech_timer.start(15000)  # 15초로 늘림 (대화가 많아질 수 있으므로)
+        self.speech_timer.start(15000)
 
     def wander_around(self):
         if not self.is_dragging and self.auto_move_enabled:
@@ -426,6 +535,7 @@ class DesktopCharacter(QWidget):
             self.current_bubble = None
 
     def show_speech(self, message):
+        """말풍선만 보여주기 (TTS 없음)"""
         self.stop_current_speech()
         bubble = SpeechBubble(message, self, self.scale_factor)
         self.current_bubble = bubble
@@ -433,7 +543,7 @@ class DesktopCharacter(QWidget):
         bubble.show()
 
         self.set_speaking_image()
-        QTimer.singleShot(4000, self.restore_image)  # 4초로 늘림
+        QTimer.singleShot(4000, self.restore_image)
         QTimer.singleShot(4000, lambda: self.remove_bubble(bubble))
 
     def remove_bubble(self, bubble):
@@ -447,12 +557,13 @@ class DesktopCharacter(QWidget):
         if self.is_dragging:
             return
         self.stop_current_speech()
-        messages = ["저랑 대화해볼래요? 🗣️", "뭔가 재미있는 이야기 없나요?", "안녕하세요! 😊"]
+        messages = ["저랑 대화해볼래요?", "뭔가 재미있는 이야기 없나요?", "안녕하세요!"]
         message = random.choice(messages)
-        self.show_speech(message)
+        self.show_speech_with_tts(message)
 
     def say_grabbed_message(self):
         self.stop_current_speech()
+        self.tts_handler.stop_speaking()
 
         messages = ["으아아악!", "이거 놔요!"]
         message = random.choice(messages)
@@ -467,6 +578,9 @@ class DesktopCharacter(QWidget):
             if not self.facing_right:
                 pixmap = pixmap.transformed(QTransform().scale(-1, 1))
             self.label.setPixmap(pixmap)
+            
+        clean_message = self.clean_text_for_tts(message)
+        self.tts_handler.speak(clean_message)
 
     def pause_movement(self):
         self.auto_move_enabled = False
@@ -478,16 +592,13 @@ class DesktopCharacter(QWidget):
         if event.button() == Qt.LeftButton:
             self.is_dragging = True
             self.drag_start_position = event.globalPos() - self.frameGeometry().topLeft()
-
             self.speech_timer.stop()
             self.say_grabbed_message()
-
             if self.has_image:
                 pixmap = self.grabbed_pixmap
                 if not self.facing_right:
                     pixmap = pixmap.transformed(QTransform().scale(-1, 1))
                 self.label.setPixmap(pixmap)
-
         elif event.button() == Qt.RightButton:
             self.show_context_menu(event.globalPos())
 
@@ -510,14 +621,11 @@ class DesktopCharacter(QWidget):
         self.is_dragging = False
         self.speed_x = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
         self.speed_y = random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
-
         self.restore_image()
         self.update_character_direction()
-
         if self.current_bubble:
             self.current_bubble.close()
             self.current_bubble = None
-
         self.speech_timer.start(10000)
         
     def show_context_menu(self, position):
@@ -555,6 +663,23 @@ class DesktopCharacter(QWidget):
             resume_action.triggered.connect(self.resume_movement)
 
         menu.addSeparator()
+        if self.tts_handler.tts_enabled:
+            tts_action = menu.addAction("🔊 소리 끄기")
+            tts_action.triggered.connect(lambda: self.toggle_tts_and_notify())
+        else:
+            tts_action = menu.addAction("🔇 소리 켜기")
+            tts_action.triggered.connect(lambda: self.toggle_tts_and_notify())
+        
+        # 말하기 속도 조절
+        speed_menu = menu.addMenu("🗣️ 말하기 속도")
+        slow_action = speed_menu.addAction("천천히")
+        slow_action.triggered.connect(lambda: self.set_speech_speed(150))
+        normal_action = speed_menu.addAction("보통")
+        normal_action.triggered.connect(lambda: self.set_speech_speed(200))
+        fast_action = speed_menu.addAction("빠르게")
+        fast_action.triggered.connect(lambda: self.set_speech_speed(300))
+
+        menu.addSeparator()
         # ChatGPT 상태 표시
         if self.chatgpt_handler and self.chatgpt_handler.client:
             status_action = menu.addAction("🤖 ChatGPT 연결됨")
@@ -562,6 +687,14 @@ class DesktopCharacter(QWidget):
         else:
             status_action = menu.addAction("❌ ChatGPT 연결 안됨")
             status_action.setEnabled(False)
+            
+        # TTS 상태 표시
+        if self.tts_handler.is_macos:
+            tts_status_action = menu.addAction("🎵 macOS TTS 사용 가능")
+            tts_status_action.setEnabled(False)
+        else:
+            tts_status_action = menu.addAction("⚠️ TTS 제한됨 (macOS 아님)")
+            tts_status_action.setEnabled(False)
 
         menu.addSeparator()
         quit_action = menu.addAction("종료 ❌")
@@ -569,10 +702,30 @@ class DesktopCharacter(QWidget):
 
         menu.exec_(position)
 
+    def toggle_tts_and_notify(self):
+        """TTS 토글하고 알림"""
+        tts_status = self.tts_handler.toggle_tts()
+        if tts_status:
+            self.show_speech_with_tts("소리를 다시 켤게요!")
+        else:
+            self.show_speech("조용히 할게요! 🔇")
+
+    def set_speech_speed(self, speed):
+        """말하기 속도 설정하고 테스트"""
+        self.tts_handler.set_voice_speed(speed)
+        if speed == 150:
+            self.show_speech_with_tts("천천히 말할게요")
+        elif speed == 200:
+            self.show_speech_with_tts("보통 속도로 말할게요")
+        elif speed == 300:
+            self.show_speech_with_tts("빠르게 말할게요")
+
     def closeEvent(self, event):
-        """프로그램 종료시 음성 인식 중지"""
+        """프로그램 종료시 음성 인식과 TTS 중지"""
         if hasattr(self, 'voice_recognizer') and self.voice_recognizer:
             self.voice_recognizer.stop_listening()
+        if hasattr(self, 'tts_handler'):
+            self.tts_handler.stop_speaking()
         event.accept()
 
 class SpeechBubble(QWidget):
@@ -657,6 +810,12 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
+    # 운영체제 확인
+    if platform.system() == "Darwin":
+        print("✅ macOS 감지됨 - TTS 기능이 완전히 지원됩니다.")
+    else:
+        print(f"⚠️  {platform.system()} 감지됨 - TTS 기능이 제한될 수 있습니다.")
+
     # 필요한 라이브러리 확인
     try:
         import speech_recognition as sr
@@ -689,7 +848,7 @@ if __name__ == "__main__":
         except:
             tray_icon.setIcon(app.style().standardIcon(app.style().SP_ComputerIcon))
 
-        tray_icon.setToolTip("데스크탑 캐릭터 (ChatGPT 대화 가능)")
+        tray_icon.setToolTip("데스크탑 캐릭터 (ChatGPT 대화 + TTS)")
         tray_menu = QMenu()
         show_action = tray_menu.addAction("캐릭터 보이기")
         show_action.triggered.connect(character.show)
