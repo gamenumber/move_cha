@@ -9,6 +9,8 @@ import math
 import time
 import requests
 import io
+import hashlib
+from collections import deque
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QMenu, QSystemTrayIcon
 from PyQt5.QtCore import Qt, QTimer, QPoint, pyqtSignal, QObject, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
 from PyQt5.QtGui import QPixmap, QFont, QPainter, QColor, QTransform, QIcon, QPen, QBrush, QRadialGradient
@@ -31,7 +33,7 @@ ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
 CUTE_GIRL_VOICES = {
     "Bella": "EXAVITQu4vr4xnSDxMaL",  # 젊고 귀여운 여성 목소리
     "Elli": "MF3mGyEYCl7XYWbV9V6O",   # 부드럽고 따뜻한 여성 목소리
-    "Rachel": "AOCS4X6oK4dxM15NLyv6", # 자연스러운 여성 목소리
+    "Rachel": "uHS0IiTHYRrc1pTZaPsm", # 자연스러운 여성 목소리
     "Domi": "AZnzlk1XvdvUeBnXmlld",   # 활기찬 여성 목소리
 }
 
@@ -244,145 +246,386 @@ class WalkingEffect(QWidget):
                 painter.restore()
 
 
-class ElevenLabsTTSHandler(QObject):
-    """Eleven Labs TTS를 처리하는 클래스"""
-    tts_finished = pyqtSignal()  # TTS 완료 시그널 추가
+class VoiceRecognizer(QObject):
+    """완전한 피드백 차단 기능이 적용된 음성 인식기"""
+    voice_command = pyqtSignal(str)
     
     def __init__(self):
         super().__init__()
+        self.recognizer = sr.Recognizer()
+        self.microphone = sr.Microphone()
+        self.is_listening = False
+        
+        # 강화된 피드백 방지 시스템
+        self.is_tts_active = False
+        self.tts_start_time = 0
+        self.tts_end_time = 0
+        self.tts_safety_buffer = 5.0  # TTS 후 5초 완전 차단
+        
+        # TTS 텍스트 추적 시스템
+        self.recent_tts_texts = deque(maxlen=10)  # 최근 10개 TTS 텍스트 저장
+        self.tts_fingerprints = set()  # TTS 텍스트 지문
+        self.blocked_until = 0  # 이 시간까지 완전 차단
+        
+        # 음성 인식 안전 설정
+        with self.microphone as source:
+            print("🎤 마이크 초기화 중...")
+            self.recognizer.adjust_for_ambient_noise(source, duration=3)
+            self.recognizer.energy_threshold = 800  # 매우 높은 임계값
+            self.recognizer.dynamic_energy_threshold = False  # 고정 임계값 사용
+            self.recognizer.pause_threshold = 1.5  # 긴 대기 시간
+            self.recognizer.phrase_time_limit = 4  # 짧은 인식 시간
+            print(f"🔧 마이크 설정 완료 (임계값: {self.recognizer.energy_threshold})")
+    
+    def create_text_fingerprint(self, text):
+        """텍스트의 고유 지문 생성"""
+        # 정규화: 소문자, 공백 제거, 특수문자 제거
+        normalized = ''.join(c.lower() for c in text if c.isalnum() or c.isspace()).strip()
+        normalized = ' '.join(normalized.split())  # 중복 공백 제거
+        
+        # 해시 생성
+        return hashlib.md5(normalized.encode()).hexdigest()[:16]
+    
+    def add_tts_text(self, text):
+        """TTS 텍스트를 추적 시스템에 추가"""
+        if not text or len(text.strip()) < 2:
+            return
+            
+        fingerprint = self.create_text_fingerprint(text)
+        self.recent_tts_texts.append(text.lower().strip())
+        self.tts_fingerprints.add(fingerprint)
+        
+        # 너무 많은 지문이 쌓이지 않도록 제한
+        if len(self.tts_fingerprints) > 50:
+            # 오래된 것들 제거 (간단한 방법)
+            self.tts_fingerprints = set(list(self.tts_fingerprints)[-30:])
+    
+    def set_tts_state(self, is_active, text=""):
+        """TTS 상태 설정 - 완전한 차단"""
+        current_time = time.time()
+        
+        if is_active:
+            self.is_tts_active = True
+            self.tts_start_time = current_time
+            self.blocked_until = current_time + 2.0  # 최소 2초 차단
+            
+            if text:
+                self.add_tts_text(text)
+                print(f"🔇 TTS 시작 - 음성 인식 완전 차단: '{text[:30]}...'")
+        else:
+            self.is_tts_active = False
+            self.tts_end_time = current_time
+            self.blocked_until = current_time + self.tts_safety_buffer
+            print(f"🔊 TTS 종료 - {self.tts_safety_buffer}초간 추가 차단")
+    
+    def is_blocked_period(self):
+        """현재 차단 기간인지 확인"""
+        current_time = time.time()
+        
+        # TTS 활성 상태면 무조건 차단
+        if self.is_tts_active:
+            return True
+            
+        # 설정된 차단 시간까지 차단
+        if current_time < self.blocked_until:
+            return True
+            
+        return False
+    
+    def is_similar_to_recent_tts(self, text):
+        """최근 TTS와 유사한 텍스트인지 확인"""
+        if not text or len(text.strip()) < 2:
+            return False
+            
+        text_clean = text.lower().strip()
+        text_fingerprint = self.create_text_fingerprint(text)
+        
+        # 1. 지문 일치 확인
+        if text_fingerprint in self.tts_fingerprints:
+            print(f"❌ 지문 일치로 차단: {text}")
+            return True
+        
+        # 2. 최근 TTS 텍스트와 직접 비교
+        for tts_text in self.recent_tts_texts:
+            # 완전 일치
+            if text_clean == tts_text:
+                print(f"❌ 완전 일치로 차단: {text}")
+                return True
+                
+            # 부분 일치 (긴 문자열의 경우)
+            if len(text_clean) > 5 and len(tts_text) > 5:
+                if text_clean in tts_text or tts_text in text_clean:
+                    print(f"❌ 부분 일치로 차단: {text}")
+                    return True
+            
+            # 단어 기반 유사도
+            text_words = set(text_clean.split())
+            tts_words = set(tts_text.split())
+            
+            if text_words and tts_words:
+                intersection = text_words & tts_words
+                union = text_words | tts_words
+                similarity = len(intersection) / len(union) if union else 0
+                
+                if similarity > 0.7:  # 70% 이상 유사하면 차단
+                    print(f"❌ 단어 유사도({similarity:.2f})로 차단: {text}")
+                    return True
+        
+        return False
+    
+    def should_ignore_text(self, text):
+        """텍스트를 무시해야 하는지 종합 판단"""
+        # 1. 차단 기간 확인
+        if self.is_blocked_period():
+            return True
+        
+        # 2. 텍스트 길이 확인
+        if len(text.strip()) < 2:
+            return True
+            
+        # 3. TTS 유사성 확인
+        if self.is_similar_to_recent_tts(text):
+            return True
+            
+        # 4. 소음 패턴 확인
+        noise_patterns = {
+            "음", "어", "아", "으", "오", "이", "에", "애", "으음", "아아", "어어",
+            "네", "응", "어응", "음음", "아음", "으어", "어음"
+        }
+        if text.strip() in noise_patterns:
+            print(f"❌ 소음 패턴으로 차단: {text}")
+            return True
+        
+        # 5. 반복 문자 확인
+        if len(set(text.strip())) <= 2 and len(text.strip()) > 1:
+            print(f"❌ 반복 문자로 차단: {text}")
+            return True
+            
+        return False
+    
+    def start_listening(self):
+        self.is_listening = True
+        thread = threading.Thread(target=self._listen_safely)
+        thread.daemon = True
+        thread.start()
+        print("🎤 안전한 음성 인식 시작")
+    
+    def stop_listening(self):
+        self.is_listening = False
+        print("🎤 음성 인식 중지")
+    
+    def _listen_safely(self):
+        """안전한 음성 인식 루프"""
+        consecutive_errors = 0
+        max_errors = 3
+        last_recognition = 0
+        min_interval = 2.0  # 최소 2초 간격
+        
+        while self.is_listening:
+            try:
+                current_time = time.time()
+                
+                # 차단 기간 확인
+                if self.is_blocked_period():
+                    time.sleep(0.2)
+                    continue
+                
+                # 인식 간격 제한
+                if current_time - last_recognition < min_interval:
+                    time.sleep(0.1)
+                    continue
+                
+                # 매우 짧은 타임아웃으로 빠른 반응
+                try:
+                    with self.microphone as source:
+                        audio = self.recognizer.listen(
+                            source,
+                            timeout=0.5,
+                            phrase_time_limit=3
+                        )
+                except sr.WaitTimeoutError:
+                    continue
+                
+                # 음성 인식 실행
+                try:
+                    text = self.recognizer.recognize_google(audio, language='ko-KR')
+                    last_recognition = current_time
+                    
+                    # 안전성 검사
+                    if self.should_ignore_text(text):
+                        continue
+                    
+                    print(f"✅ 안전한 음성 인식: {text}")
+                    self.voice_command.emit(text)
+                    consecutive_errors = 0
+                    
+                except sr.UnknownValueError:
+                    # 인식 실패는 정상
+                    consecutive_errors = 0
+                    
+                except sr.RequestError as e:
+                    consecutive_errors += 1
+                    print(f"❌ 음성 인식 서비스 오류: {e}")
+                    
+                    if consecutive_errors >= max_errors:
+                        print("⏸️  오류로 인한 10초 대기")
+                        time.sleep(10)
+                        consecutive_errors = 0
+                        
+            except Exception as e:
+                consecutive_errors += 1
+                print(f"❌ 음성 인식 예외: {e}")
+                
+                if consecutive_errors >= max_errors:
+                    print("⏸️  예외로 인한 10초 대기")
+                    time.sleep(10)
+                    consecutive_errors = 0
+
+
+class SafeTTSHandler(QObject):
+    """안전한 TTS 핸들러"""
+    tts_started = pyqtSignal(str)
+    tts_finished = pyqtSignal()
+    
+    def __init__(self, voice_recognizer):
+        super().__init__()
+        self.voice_recognizer = voice_recognizer
         self.api_key = ELEVENLABS_API_KEY
         self.voice_id = DEFAULT_VOICE_ID
         self.tts_enabled = True
         self.is_speaking = False
         self.is_singing = False
+        self.current_text = ""
+        
+        # 미디어 플레이어 설정
         self.media_player = QMediaPlayer()
+        self.media_player.stateChanged.connect(self.on_state_changed)
         self.media_player.mediaStatusChanged.connect(self.on_media_status_changed)
         
-        # 음성 설정
-        self.voice_settings = {
-            "stability": 0.75,      # 안정성 (0-1): 높을수록 일관된 목소리
-            "similarity_boost": 0.8, # 유사성 (0-1): 원본 목소리와의 유사도
-            "style": 0.5,           # 스타일 (0-1): 표현력
-            "use_speaker_boost": True
-        }
-        
-        # 노래할 때의 설정
-        self.singing_settings = {
-            "stability": 0.6,       # 노래할 때는 약간 더 표현력 있게
-            "similarity_boost": 0.75,
-            "style": 0.7,           # 더 표현력 있게
-            "use_speaker_boost": True
-        }
-        
-        print(f"🎤 Eleven Labs TTS 초기화됨")
-        if self.api_key:
-            print(f"✅ API 키 설정됨, 기본 음성: Bella (귀여운 여자아이)")
-        else:
-            print("⚠️  ELEVENLABS_API_KEY 환경변수를 설정해주세요")
+        print("🎤 안전한 TTS 핸들러 초기화")
+    
+    def on_state_changed(self, state):
+        """플레이어 상태 변경"""
+        if state == QMediaPlayer.PlayingState:
+            self.is_speaking = True
+            # 음성 인식기에 TTS 시작 알림
+            self.voice_recognizer.set_tts_state(True, self.current_text)
+            self.tts_started.emit(self.current_text)
+            
+        elif state == QMediaPlayer.StoppedState:
+            if self.is_speaking:  # 실제로 재생 중이었다면
+                self.is_speaking = False
+                self.is_singing = False
+                # 음성 인식기에 TTS 종료 알림
+                self.voice_recognizer.set_tts_state(False)
+                self.tts_finished.emit()
+                self.current_text = ""
     
     def on_media_status_changed(self, status):
-        """미디어 재생 상태 변경 시 호출"""
-        if status == QMediaContent.EndOfMedia or status == QMediaContent.InvalidMedia:
-            self.is_speaking = False
-            self.is_singing = False
-            self.tts_finished.emit()
+        """미디어 상태 변경"""
+        if status in [QMediaContent.EndOfMedia, QMediaContent.InvalidMedia]:
+            if self.is_speaking:
+                self.is_speaking = False
+                self.is_singing = False
+                self.voice_recognizer.set_tts_state(False)
+                self.tts_finished.emit()
+                self.current_text = ""
     
     def speak(self, text, is_singing=False):
-        """텍스트를 음성으로 출력 (Eleven Labs 사용)"""
-        if not self.tts_enabled or not self.api_key:
-            if not self.api_key:
-                print("Eleven Labs API 키가 설정되지 않았습니다.")
+        """안전한 TTS 실행"""
+        if not self.tts_enabled or not self.api_key or not text.strip():
             return
             
-        self.is_speaking = True
-        self.is_singing = is_singing
+        # 이전 TTS 즉시 중지
+        self.stop_speaking()
         
-        # 백그라운드 스레드에서 TTS 요청
-        thread = threading.Thread(target=self._speak_elevenlabs, args=(text, is_singing))
+        self.current_text = text.strip()
+        self.is_singing = is_singing
+        print(f"🎤 안전한 TTS 시작: {self.current_text[:50]}...")
+        
+        # 백그라운드에서 TTS 생성
+        thread = threading.Thread(target=self._generate_tts, args=(text, is_singing))
         thread.daemon = True
         thread.start()
     
-    def _speak_elevenlabs(self, text, is_singing=False):
-        """Eleven Labs API를 사용하여 TTS 실행"""
+    def stop_speaking(self):
+        """TTS 즉시 중지"""
+        if self.is_speaking:
+            print("⏹️  TTS 강제 중지")
+            self.media_player.stop()
+            self.is_speaking = False
+            self.is_singing = False
+            self.voice_recognizer.set_tts_state(False)
+            self.current_text = ""
+    
+    def _generate_tts(self, text, is_singing=False):
+        """TTS 생성 및 재생"""
         try:
-            # 노래 모드에 따라 다른 설정 사용
-            settings = self.singing_settings if is_singing else self.voice_settings
+            # 미리 음성 인식 차단 시작
+            self.voice_recognizer.set_tts_state(True, text)
+            
+            settings = {
+                "stability": 0.6 if is_singing else 0.5,
+                "similarity_boost": 0.7 if is_singing else 0.6,
+                "style": 0.4 if is_singing else 0.2,
+                "use_speaker_boost": False
+            }
             
             headers = {
-                "Accept": "audio/mpeg",
+                "Accept": "audio/mpeg", 
                 "Content-Type": "application/json",
                 "xi-api-key": self.api_key
             }
             
             data = {
                 "text": text,
-                "model_id": "eleven_multilingual_v2",  # 다국어 모델 (한국어 지원)
+                "model_id": "eleven_multilingual_v2",
                 "voice_settings": settings
             }
             
-            # API 요청
             response = requests.post(
-                f"{ELEVENLABS_URL}/{self.voice_id}",
+                f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}",
                 json=data,
                 headers=headers,
-                timeout=30
+                timeout=20
             )
             
             if response.status_code == 200:
-                # 임시 파일에 오디오 저장
+                # 임시 파일 생성 및 재생
                 import tempfile
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp_file:
                     tmp_file.write(response.content)
                     tmp_filename = tmp_file.name
                 
-                # Qt 미디어 플레이어로 재생
+                # 재생
                 url = QUrl.fromLocalFile(tmp_filename)
-                content = QMediaContent(url)
-                self.media_player.setMedia(content)
+                self.media_player.setMedia(QMediaContent(url))
                 self.media_player.play()
                 
-                # 재생 완료 후 임시 파일 삭제를 위한 타이머
-                QTimer.singleShot(10000, lambda: self._cleanup_temp_file(tmp_filename))
+                # 파일 정리
+                QTimer.singleShot(20000, lambda: self._cleanup_file(tmp_filename))
                 
             else:
-                print(f"Eleven Labs API 오류: {response.status_code}")
-                print(f"응답: {response.text}")
-                self.is_speaking = False
-                self.is_singing = False
-                self.tts_finished.emit()
+                print(f"❌ TTS API 오류: {response.status_code}")
+                self.voice_recognizer.set_tts_state(False)
                 
-        except requests.exceptions.Timeout:
-            print("Eleven Labs API 요청 시간 초과")
-            self.is_speaking = False
-            self.is_singing = False
-            self.tts_finished.emit()
-        except requests.exceptions.RequestException as e:
-            print(f"Eleven Labs API 요청 오류: {e}")
-            self.is_speaking = False
-            self.is_singing = False
-            self.tts_finished.emit()
         except Exception as e:
-            print(f"TTS 오류: {e}")
-            self.is_speaking = False
-            self.is_singing = False
-            self.tts_finished.emit()
+            print(f"❌ TTS 생성 오류: {e}")
+            self.voice_recognizer.set_tts_state(False)
     
-    def _cleanup_temp_file(self, filename):
+    def _cleanup_file(self, filename):
         """임시 파일 정리"""
         try:
+            import os
             os.unlink(filename)
         except:
             pass
     
-    def stop_speaking(self):
-        """현재 진행 중인 TTS 중지"""
-        self.media_player.stop()
-        self.is_speaking = False
-        self.is_singing = False
-    
     def toggle_tts(self):
-        """TTS 켜기/끄기"""
+        """TTS 활성화/비활성화"""
         self.tts_enabled = not self.tts_enabled
+        if not self.tts_enabled:
+            self.stop_speaking()
         return self.tts_enabled
     
     def set_voice(self, voice_name):
@@ -392,15 +635,6 @@ class ElevenLabsTTSHandler(QObject):
             print(f"음성을 {voice_name}로 변경했습니다.")
             return True
         return False
-    
-    def set_voice_style(self, stability=None, similarity=None, style=None):
-        """음성 스타일 조정"""
-        if stability is not None:
-            self.voice_settings["stability"] = max(0, min(1, stability))
-        if similarity is not None:
-            self.voice_settings["similarity_boost"] = max(0, min(1, similarity))
-        if style is not None:
-            self.voice_settings["style"] = max(0, min(1, style))
 
 
 class SongDatabase:
@@ -557,48 +791,6 @@ class ChatGPTHandler(QObject):
         thread.start()
 
 
-class VoiceRecognizer(QObject):
-    voice_command = pyqtSignal(str)
-    
-    def __init__(self):
-        super().__init__()
-        self.recognizer = sr.Recognizer()
-        self.microphone = sr.Microphone()
-        self.is_listening = False
-        
-        with self.microphone as source:
-            self.recognizer.adjust_for_ambient_noise(source)
-    
-    def start_listening(self):
-        self.is_listening = True
-        thread = threading.Thread(target=self._listen_continuously)
-        thread.daemon = True
-        thread.start()
-    
-    def stop_listening(self):
-        self.is_listening = False
-    
-    def _listen_continuously(self):
-        while self.is_listening:
-            try:
-                with self.microphone as source:
-                    audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=5)
-                
-                try:
-                    text = self.recognizer.recognize_google(audio, language='ko-KR')
-                    print(f"음성 인식 결과: {text}")
-                    self.voice_command.emit(text)
-                except sr.UnknownValueError:
-                    pass
-                except sr.RequestError as e:
-                    print(f"음성 인식 서비스 오류: {e}")
-                    
-            except sr.WaitTimeoutError:
-                pass
-            except Exception as e:
-                print(f"음성 인식 오류: {e}")
-
-
 class DesktopCharacter(QWidget):
     def __init__(self):
         super().__init__()
@@ -634,25 +826,28 @@ class DesktopCharacter(QWidget):
         self.load_character()
         self.setup_movement()
         self.setup_interactions()
-        self.setup_voice_recognition()
+        self.setup_safe_voice_system()
         self.setup_chatgpt()
-        self.setup_tts()
 
-    def setup_tts(self):
-        """Eleven Labs TTS 핸들러 설정"""
-        self.tts_handler = ElevenLabsTTSHandler()
-        # TTS 완료 시그널 연결
+    def setup_safe_voice_system(self):
+        """완전한 피드백 차단 시스템 설정"""
+        # 1. 음성 인식기 먼저 생성
+        self.voice_recognizer = VoiceRecognizer()
+        self.voice_recognizer.voice_command.connect(self.handle_voice_command)
+        
+        # 2. 안전한 TTS 핸들러 생성 (음성 인식기 참조 전달)
+        self.tts_handler = SafeTTSHandler(self.voice_recognizer)
         self.tts_handler.tts_finished.connect(self.on_tts_finished)
+        
+        # 3. 음성 인식 시작
+        self.voice_recognizer.start_listening()
+        
         if self.tts_handler.api_key:
-            print("✅ Eleven Labs TTS가 활성화되었습니다.")
+            print("✅ Eleven Labs TTS가 활성화되었습니다. (완전한 피드백 차단)")
         else:
             print("⚠️  Eleven Labs API 키가 설정되지 않았습니다.")
-
-    def on_tts_finished(self):
-        """TTS 완료 시 호출"""
-        if self.is_singing:
-            # 노래가 끝나면 노래 모드 종료
-            self.stop_singing()
+        
+        print("🛡️  완전한 피드백 차단 시스템 활성화")
 
     def setup_chatgpt(self):
         """ChatGPT 핸들러 설정"""
@@ -661,17 +856,6 @@ class DesktopCharacter(QWidget):
             self.chatgpt_handler.response_ready.connect(self.handle_chatgpt_response)
         else:
             self.chatgpt_handler = None
-
-    def setup_voice_recognition(self):
-        """음성 인식 설정"""
-        try:
-            self.voice_recognizer = VoiceRecognizer()
-            self.voice_recognizer.voice_command.connect(self.handle_voice_command)
-            self.voice_recognizer.start_listening()
-            print("음성 인식 시작됨")
-        except Exception as e:
-            print(f"음성 인식 초기화 실패: {e}")
-            self.voice_recognizer = None
 
     def clean_text_for_tts(self, text):
         """TTS에 적합하도록 텍스트 정리"""
@@ -692,13 +876,19 @@ class DesktopCharacter(QWidget):
         return text if text else ""
 
     def show_speech_with_tts(self, message, is_singing=False):
-        """말풍선과 함께 Eleven Labs TTS로 음성 출력"""
+        """말풍선과 함께 안전한 TTS로 음성 출력"""
         self.tts_handler.stop_speaking()
         self.show_speech(message)
         
         clean_message = self.clean_text_for_tts(message)
         if clean_message:
             self.tts_handler.speak(clean_message, is_singing)
+
+    def on_tts_finished(self):
+        """TTS 완료 시 호출"""
+        if self.is_singing:
+            # 노래가 끝나면 노래 모드 종료
+            self.stop_singing()
 
     def start_singing(self, song):
         """노래 시작"""
@@ -1453,7 +1643,7 @@ class DesktopCharacter(QWidget):
         effect_status.setEnabled(False)
         
         # 현재 음성 표시
-        current_voice = "Bella"  # 기본값
+        current_voice = "Rachel"  # 기본값
         for voice_name, voice_id in CUTE_GIRL_VOICES.items():
             if voice_id == self.tts_handler.voice_id:
                 current_voice = voice_name
@@ -1484,6 +1674,10 @@ class DesktopCharacter(QWidget):
         else:
             tts_status_action = menu.addAction("⚠️ Eleven Labs API 키 필요")
             tts_status_action.setEnabled(False)
+
+        # 피드백 차단 상태 표시
+        feedback_status = menu.addAction("🛡️ 완전한 피드백 차단 활성화")
+        feedback_status.setEnabled(False)
 
         menu.addSeparator()
         quit_action = menu.addAction("종료 ❌")
@@ -1665,6 +1859,14 @@ if __name__ == "__main__":
         print("   환경변수 ELEVENLABS_API_KEY를 설정해주세요.")
         print("   https://elevenlabs.io 에서 API 키를 발급받을 수 있습니다.")
 
+    print("\n🛡️  완전한 TTS 피드백 루프 차단 시스템:")
+    print("• TTS 재생 중 완전 음성 인식 차단")
+    print("• TTS 종료 후 5초 추가 안전 시간")
+    print("• 텍스트 지문(Fingerprint) 기반 유사도 검사")
+    print("• 다층 필터링 시스템 (완전일치, 부분일치, 단어유사도)")
+    print("• 소음 패턴 자동 차단")
+    print("• 최소 2초 간격 음성 인식")
+
     print("\n🎤 Eleven Labs TTS 기능:")
     print("• Bella - 기본 귀여운 여자아이 목소리")
     print("• Elli - 부드럽고 따뜻한 여성 목소리")
@@ -1706,6 +1908,12 @@ if __name__ == "__main__":
     print("2. 환경변수 ELEVENLABS_API_KEY 설정")
     print("3. OpenAI API 키 (ChatGPT 기능용, 선택사항)")
     print("4. 마이크 권한 허용 (음성 인식용)")
+    
+    print("\n💡 완전한 피드백 차단을 위한 팁:")
+    print("• 헤드셋 사용 권장 (스피커 출력이 마이크로 들어가지 않음)")
+    print("• 마이크를 스피커에서 멀리 배치")
+    print("• 적절한 볼륨 조절")
+    print("• 시스템이 자동으로 TTS와 음성 인식을 완전 분리")
 
     character = DesktopCharacter()
     character.show()
@@ -1717,7 +1925,7 @@ if __name__ == "__main__":
         except:
             tray_icon.setIcon(app.style().standardIcon(app.style().SP_ComputerIcon))
 
-        tray_icon.setToolTip("데스크탑 캐릭터 (ChatGPT + Eleven Labs TTS + 노래 + 이펙트)")
+        tray_icon.setToolTip("데스크탑 캐릭터 (완전한 피드백 차단 + ChatGPT + Eleven Labs TTS + 노래 + 이펙트)")
         tray_menu = QMenu()
         show_action = tray_menu.addAction("캐릭터 보이기")
         show_action.triggered.connect(character.show)
