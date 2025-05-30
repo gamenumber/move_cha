@@ -7,9 +7,13 @@ import subprocess
 import speech_recognition as sr
 import math
 import time
+import requests
+import io
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QMenu, QSystemTrayIcon
 from PyQt5.QtCore import Qt, QTimer, QPoint, pyqtSignal, QObject, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
 from PyQt5.QtGui import QPixmap, QFont, QPainter, QColor, QTransform, QIcon, QPen, QBrush, QRadialGradient
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+from PyQt5.QtCore import QUrl
 
 # OpenAI API 추가
 try:
@@ -18,6 +22,21 @@ try:
 except ImportError:
     OPENAI_AVAILABLE = False
     print("OpenAI 라이브러리가 설치되지 않았습니다. 'pip install openai'로 설치해주세요.")
+
+# Eleven Labs API 설정
+ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY')  # 환경변수에서 API 키 가져오기
+ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
+
+# 귀여운 여자아이 목소리 ID들 (Eleven Labs에서 제공하는 음성들)
+CUTE_GIRL_VOICES = {
+    "Bella": "EXAVITQu4vr4xnSDxMaL",  # 젊고 귀여운 여성 목소리
+    "Elli": "MF3mGyEYCl7XYWbV9V6O",   # 부드럽고 따뜻한 여성 목소리
+    "Rachel": "AOCS4X6oK4dxM15NLyv6", # 자연스러운 여성 목소리
+    "Domi": "AZnzlk1XvdvUeBnXmlld",   # 활기찬 여성 목소리
+}
+
+# 기본 음성 선택 (Bella - 가장 귀여운 목소리)
+DEFAULT_VOICE_ID = CUTE_GIRL_VOICES["Rachel"]
 
 if platform.system() == "Windows":
     import ctypes
@@ -225,116 +244,163 @@ class WalkingEffect(QWidget):
                 painter.restore()
 
 
-class TTSHandler(QObject):
-    """macOS TTS를 처리하는 클래스"""
+class ElevenLabsTTSHandler(QObject):
+    """Eleven Labs TTS를 처리하는 클래스"""
     tts_finished = pyqtSignal()  # TTS 완료 시그널 추가
     
     def __init__(self):
         super().__init__()
-        self.is_macos = platform.system() == "Darwin"
+        self.api_key = ELEVENLABS_API_KEY
+        self.voice_id = DEFAULT_VOICE_ID
         self.tts_enabled = True
-        self.voice = "Yuna"  # 한국어 음성 (없으면 기본 음성 사용)
-        self.speech_rate = "200"  # 말하기 속도 (단어/분)
-        self.is_speaking = False  # TTS 상태 추가
-        self.is_singing = False  # 노래 모드 추가
+        self.is_speaking = False
+        self.is_singing = False
+        self.media_player = QMediaPlayer()
+        self.media_player.mediaStatusChanged.connect(self.on_media_status_changed)
         
-    def speak(self, text, is_singing=False):
-        """텍스트를 음성으로 출력"""
-        if not self.tts_enabled:
-            return
-            
-        self.is_speaking = True
-        self.is_singing = is_singing
-        if self.is_macos:
-            self.speak_macos(text, is_singing)
+        # 음성 설정
+        self.voice_settings = {
+            "stability": 0.75,      # 안정성 (0-1): 높을수록 일관된 목소리
+            "similarity_boost": 0.8, # 유사성 (0-1): 원본 목소리와의 유사도
+            "style": 0.5,           # 스타일 (0-1): 표현력
+            "use_speaker_boost": True
+        }
+        
+        # 노래할 때의 설정
+        self.singing_settings = {
+            "stability": 0.6,       # 노래할 때는 약간 더 표현력 있게
+            "similarity_boost": 0.75,
+            "style": 0.7,           # 더 표현력 있게
+            "use_speaker_boost": True
+        }
+        
+        print(f"🎤 Eleven Labs TTS 초기화됨")
+        if self.api_key:
+            print(f"✅ API 키 설정됨, 기본 음성: Bella (귀여운 여자아이)")
         else:
-            print(f"[TTS 지원되지 않음] {text}")
+            print("⚠️  ELEVENLABS_API_KEY 환경변수를 설정해주세요")
+    
+    def on_media_status_changed(self, status):
+        """미디어 재생 상태 변경 시 호출"""
+        if status == QMediaContent.EndOfMedia or status == QMediaContent.InvalidMedia:
             self.is_speaking = False
             self.is_singing = False
             self.tts_finished.emit()
     
-    def play_system_sound(self, sound_name="Glass"):
-        """macOS 시스템 효과음 재생"""
-        if not self.is_macos:
+    def speak(self, text, is_singing=False):
+        """텍스트를 음성으로 출력 (Eleven Labs 사용)"""
+        if not self.tts_enabled or not self.api_key:
+            if not self.api_key:
+                print("Eleven Labs API 키가 설정되지 않았습니다.")
             return
             
-        def sound_worker():
-            try:
-                subprocess.run(["afplay", f"/System/Library/Sounds/{sound_name}.aiff"], check=True)
-            except subprocess.CalledProcessError:
-                # 기본 효과음이 없으면 다른 시스템 효과음 시도
-                try:
-                    subprocess.run(["afplay", "/System/Library/Sounds/Ping.aiff"], check=True)
-                except:
-                    pass
-            except Exception as e:
-                print(f"효과음 재생 오류: {e}")
+        self.is_speaking = True
+        self.is_singing = is_singing
         
-        thread = threading.Thread(target=sound_worker)
+        # 백그라운드 스레드에서 TTS 요청
+        thread = threading.Thread(target=self._speak_elevenlabs, args=(text, is_singing))
         thread.daemon = True
         thread.start()
     
-    def speak_macos(self, text, is_singing=False):
-        """macOS에서 say 명령어로 TTS 실행"""
-        def speak_worker():
-            try:
-                cmd = ["say"]
+    def _speak_elevenlabs(self, text, is_singing=False):
+        """Eleven Labs API를 사용하여 TTS 실행"""
+        try:
+            # 노래 모드에 따라 다른 설정 사용
+            settings = self.singing_settings if is_singing else self.voice_settings
+            
+            headers = {
+                "Accept": "audio/mpeg",
+                "Content-Type": "application/json",
+                "xi-api-key": self.api_key
+            }
+            
+            data = {
+                "text": text,
+                "model_id": "eleven_multilingual_v2",  # 다국어 모델 (한국어 지원)
+                "voice_settings": settings
+            }
+            
+            # API 요청
+            response = requests.post(
+                f"{ELEVENLABS_URL}/{self.voice_id}",
+                json=data,
+                headers=headers,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                # 임시 파일에 오디오 저장
+                import tempfile
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp_file:
+                    tmp_file.write(response.content)
+                    tmp_filename = tmp_file.name
                 
-                # 한국어 음성 확인 및 사용
-                try:
-                    result = subprocess.run(["say", "-v", "?"], capture_output=True, text=True)
-                    if "Yuna" in result.stdout:
-                        cmd.extend(["-v", "Yuna"])
-                    elif "korean" in result.stdout.lower():
-                        for line in result.stdout.split('\n'):
-                            if 'korean' in line.lower():
-                                voice_name = line.split()[0]
-                                cmd.extend(["-v", voice_name])
-                                break
-                except:
-                    pass
+                # Qt 미디어 플레이어로 재생
+                url = QUrl.fromLocalFile(tmp_filename)
+                content = QMediaContent(url)
+                self.media_player.setMedia(content)
+                self.media_player.play()
                 
-                # 노래 모드일 때는 속도와 피치 조정
-                if is_singing:
-                    cmd.extend(["-r", "150"])  # 느리게
-                    # macOS에서는 피치 조정이 제한적이지만 시도
-                else:
-                    cmd.extend(["-r", self.speech_rate])
+                # 재생 완료 후 임시 파일 삭제를 위한 타이머
+                QTimer.singleShot(10000, lambda: self._cleanup_temp_file(tmp_filename))
                 
-                cmd.append(text)
-                subprocess.run(cmd, check=True)
-                
-            except subprocess.CalledProcessError as e:
-                print(f"TTS 실행 오류: {e}")
-            except Exception as e:
-                print(f"TTS 오류: {e}")
-            finally:
+            else:
+                print(f"Eleven Labs API 오류: {response.status_code}")
+                print(f"응답: {response.text}")
                 self.is_speaking = False
                 self.is_singing = False
                 self.tts_finished.emit()
-        
-        thread = threading.Thread(target=speak_worker)
-        thread.daemon = True
-        thread.start()
+                
+        except requests.exceptions.Timeout:
+            print("Eleven Labs API 요청 시간 초과")
+            self.is_speaking = False
+            self.is_singing = False
+            self.tts_finished.emit()
+        except requests.exceptions.RequestException as e:
+            print(f"Eleven Labs API 요청 오류: {e}")
+            self.is_speaking = False
+            self.is_singing = False
+            self.tts_finished.emit()
+        except Exception as e:
+            print(f"TTS 오류: {e}")
+            self.is_speaking = False
+            self.is_singing = False
+            self.tts_finished.emit()
+    
+    def _cleanup_temp_file(self, filename):
+        """임시 파일 정리"""
+        try:
+            os.unlink(filename)
+        except:
+            pass
     
     def stop_speaking(self):
         """현재 진행 중인 TTS 중지"""
-        if self.is_macos:
-            try:
-                subprocess.run(["killall", "say"], check=False)
-            except:
-                pass
+        self.media_player.stop()
         self.is_speaking = False
         self.is_singing = False
-    
-    def set_voice_speed(self, speed):
-        """말하기 속도 설정 (100-300 권장)"""
-        self.speech_rate = str(max(100, min(400, speed)))
     
     def toggle_tts(self):
         """TTS 켜기/끄기"""
         self.tts_enabled = not self.tts_enabled
         return self.tts_enabled
+    
+    def set_voice(self, voice_name):
+        """음성 변경"""
+        if voice_name in CUTE_GIRL_VOICES:
+            self.voice_id = CUTE_GIRL_VOICES[voice_name]
+            print(f"음성을 {voice_name}로 변경했습니다.")
+            return True
+        return False
+    
+    def set_voice_style(self, stability=None, similarity=None, style=None):
+        """음성 스타일 조정"""
+        if stability is not None:
+            self.voice_settings["stability"] = max(0, min(1, stability))
+        if similarity is not None:
+            self.voice_settings["similarity_boost"] = max(0, min(1, similarity))
+        if style is not None:
+            self.voice_settings["style"] = max(0, min(1, style))
 
 
 class SongDatabase:
@@ -345,51 +411,51 @@ class SongDatabase:
             "동요": [
                 {
                     "title": "작은별",
-                    "lyrics": "반짝반짝 작은별 ~ 아름답게 비치네 ~ 서쪽하늘 높이떠서 ~ 아름답게 비치네 ~",
+                    "lyrics": "반짝반짝 작은별~ 아름답게 비치네~ 서쪽하늘 높이떠서~ 아름답게 비치네~",
                     "tempo": "slow"
                 },
                 {
                     "title": "곰 세마리",
-                    "lyrics": "곰 세마리가 한집에 있어 ~ 아빠곰 엄마곰 애기곰 ~ 아빠곰은 뚱뚱해 ~ 엄마곰은 날씬해 ~ 애기곰은 너무 귀여워 ~",
+                    "lyrics": "곰 세마리가 한집에 있어~ 아빠곰 엄마곰 애기곰~ 아빠곰은 뚱뚱해~ 엄마곰은 날씬해~ 애기곰은 너무 귀여워~",
                     "tempo": "medium"
                 },
                 {
                     "title": "학교종",
-                    "lyrics": "학교종이 땡땡땡 ~ 어서모이자 ~ 선생님이 우리를 ~ 기다리신다 ~",
+                    "lyrics": "학교종이 땡땡땡~ 어서모이자~ 선생님이 우리를~ 기다리신다~",
                     "tempo": "fast"
                 },
                 {
                     "title": "산토끼",
-                    "lyrics": "산토끼 토끼야 ~ 어디를 가느냐 ~ 깡총깡총 뛰면서 ~ 어디를 가느냐 ~",
+                    "lyrics": "산토끼 토끼야~ 어디를 가느냐~ 깡총깡총 뛰면서~ 어디를 가느냐~",
                     "tempo": "fast"
                 }
             ],
             "가요": [
                 {
                     "title": "아리랑",
-                    "lyrics": "아리랑 아리랑 아라리요 ~ 아리랑 고개로 넘어간다 ~ 나를 버리고 가시는 님은 ~ 십리도 못가서 발병난다 ~",
+                    "lyrics": "아리랑 아리랑 아라리요~ 아리랑 고개로 넘어간다~ 나를 버리고 가시는 님은~ 십리도 못가서 발병난다~",
                     "tempo": "slow"
                 },
                 {
                     "title": "도라지",
-                    "lyrics": "도라지 도라지 백도라지 ~ 심심산천에 백도라지 ~ 한두뿌리만 캐어도 ~ 대바구니 넘는다 ~",
+                    "lyrics": "도라지 도라지 백도라지~ 심심산천에 백도라지~ 한두뿌리만 캐어도~ 대바구니 넘는다~",
                     "tempo": "medium"
                 },
                 {
                     "title": "고향의 봄",
-                    "lyrics": "나의 살던 고향은 ~ 꽃피는 산골 ~ 복숭아꽃 살구꽃 ~ 아기진달래 ~",
+                    "lyrics": "나의 살던 고향은~ 꽃피는 산골~ 복숭아꽃 살구꽃~ 아기진달래~",
                     "tempo": "slow"
                 }
             ],
             "팝송": [
                 {
                     "title": "Happy Birthday",
-                    "lyrics": "Happy birthday to you ~ Happy birthday to you ~ Happy birthday dear friend ~ Happy birthday to you ~",
+                    "lyrics": "Happy birthday to you~ Happy birthday to you~ Happy birthday dear friend~ Happy birthday to you~",
                     "tempo": "medium"
                 },
                 {
                     "title": "Mary Had a Little Lamb",
-                    "lyrics": "Mary had a little lamb ~ Its fleece was white as snow ~ And everywhere that Mary went ~ The lamb was sure to go ~",
+                    "lyrics": "Mary had a little lamb~ Its fleece was white as snow~ And everywhere that Mary went~ The lamb was sure to go~",
                     "tempo": "medium"
                 }
             ]
@@ -455,13 +521,14 @@ class ChatGPTHandler(QObject):
         try:
             system_prompt = """당신은 귀엽고 친근한 데스크탑 캐릭터입니다. 
             사용자와 대화할 때 다음 특징을 가지세요:
-            - 친근하고 귀여운 말투 사용
+            - 친근하고 귀여운 말투 사용 (반말, 애교 표현)
             - 간단하고 짧은 답변 (1-2문장)
             - 이모티콘 적절히 사용
             - 한국어로 대답
             - 데스크탑에서 함께 지내는 친구 같은 느낌
-            - TTS로 읽히기 때문에 너무 복잡한 기호나 이모티콘은 피하기
-            - 노래와 관련된 요청이 있으면 기꺼이 도와주기"""
+            - 귀여운 여자아이 목소리로 말할 예정이므로 그에 맞는 톤
+            - 노래와 관련된 요청이 있으면 기꺼이 도와주기
+            - '~해요', '~이에요' 보다는 '~해', '~야' 등 친근한 반말 사용"""
             
             response = self.client.chat.completions.create(
                 model="gpt-3.5-turbo",
@@ -477,7 +544,7 @@ class ChatGPTHandler(QObject):
             
         except Exception as e:
             print(f"ChatGPT API 오류: {e}")
-            return "음... 지금은 잘 모르겠어요"
+            return "음... 지금은 잘 모르겠어 💭"
     
     def get_response_async(self, user_message):
         """비동기로 ChatGPT 응답 받기"""
@@ -572,14 +639,14 @@ class DesktopCharacter(QWidget):
         self.setup_tts()
 
     def setup_tts(self):
-        """TTS 핸들러 설정"""
-        self.tts_handler = TTSHandler()
+        """Eleven Labs TTS 핸들러 설정"""
+        self.tts_handler = ElevenLabsTTSHandler()
         # TTS 완료 시그널 연결
         self.tts_handler.tts_finished.connect(self.on_tts_finished)
-        if self.tts_handler.is_macos:
-            print("✅ macOS TTS가 활성화되었습니다.")
+        if self.tts_handler.api_key:
+            print("✅ Eleven Labs TTS가 활성화되었습니다.")
         else:
-            print("⚠️  macOS가 아니므로 TTS 기능이 제한됩니다.")
+            print("⚠️  Eleven Labs API 키가 설정되지 않았습니다.")
 
     def on_tts_finished(self):
         """TTS 완료 시 호출"""
@@ -609,12 +676,12 @@ class DesktopCharacter(QWidget):
     def clean_text_for_tts(self, text):
         """TTS에 적합하도록 텍스트 정리"""
         # 기본 이모티콘들 제거
-        basic_emojis = ['😊', '😄', '😅', '🤔', '🗣️', '🏃‍♀️', '⏸️', '▶️', '🔍', '❌', '👋', '✨', '🔊', '🔇', '🎵', '🎶', '♪', '♫']
+        basic_emojis = ['😊', '😄', '😅', '🤔', '🗣️', '🏃‍♀️', '⏸️', '▶️', '🔍', '❌', '👋', '✨', '🔊', '🔇', '🎵', '🎶', '♪', '♫', '💭']
         for emoji in basic_emojis:
             text = text.replace(emoji, '')
         
-        # 연속된 점들 정리
-        text = text.replace('...', '').replace('..', '')
+        # 연속된 점들과 물결표 정리
+        text = text.replace('...', '').replace('..', '').replace('~', ' ')
         
         # 불필요한 공백 정리
         text = ' '.join(text.split())
@@ -625,7 +692,7 @@ class DesktopCharacter(QWidget):
         return text if text else ""
 
     def show_speech_with_tts(self, message, is_singing=False):
-        """말풍선과 함께 TTS로 음성 출력"""
+        """말풍선과 함께 Eleven Labs TTS로 음성 출력"""
         self.tts_handler.stop_speaking()
         self.show_speech(message)
         
@@ -725,10 +792,10 @@ class DesktopCharacter(QWidget):
             if "멈춰" in text_lower or "그만" in text_lower or "중지" in text_lower:
                 if self.is_singing:
                     self.stop_singing()
-                    self.show_speech_with_tts("노래를 멈췄어요!")
+                    self.show_speech_with_tts("노래를 멈췄어!")
                     return
                 else:
-                    self.show_speech_with_tts("지금 노래하고 있지 않아요!")
+                    self.show_speech_with_tts("지금 노래하고 있지 않아!")
                     return
             elif "불러" in text_lower or "해줘" in text_lower or "부탁" in text_lower:
                 self.start_random_song()
@@ -767,57 +834,64 @@ class DesktopCharacter(QWidget):
                 self.start_random_song()
                 return
         
+        # 음성 변경 명령어
+        if "목소리" in text_lower or "음성" in text_lower:
+            if "벨라" in text_lower or "bella" in text_lower:
+                self.change_voice("Bella")
+                return
+            elif "엘리" in text_lower or "elli" in text_lower:
+                self.change_voice("Elli")
+                return
+            elif "레이첼" in text_lower or "rachel" in text_lower:
+                self.change_voice("Rachel")
+                return
+            elif "도미" in text_lower or "domi" in text_lower:
+                self.change_voice("Domi")
+                return
+        
         # 기존 명령어들
         if "커" in text_lower or "크게" in text_lower:
             self.scale_up()
-            self.show_speech_with_tts("커졌어요!")
+            self.show_speech_with_tts("커졌어!")
             return
         elif "작" in text_lower or "작게" in text_lower:
             self.scale_down()
-            self.show_speech_with_tts("작아졌어요!")
+            self.show_speech_with_tts("작아졌어!")
             return
         elif "멈춰" in text_lower or "정지" in text_lower:
             if self.is_singing:
                 self.stop_singing()
-                self.show_speech_with_tts("노래를 멈췄어요!")
+                self.show_speech_with_tts("노래를 멈췄어!")
             else:
                 self.pause_movement()
-                self.show_speech_with_tts("멈췄어요!")
+                self.show_speech_with_tts("멈췄어!")
             return
         elif "움직여" in text_lower or "돌아다녀" in text_lower:
             self.resume_movement()
-            self.show_speech_with_tts("다시 움직일게요!")
+            self.show_speech_with_tts("다시 움직일게!")
             return
         elif "조용" in text_lower or "음소거" in text_lower:
             if self.is_singing:
                 self.stop_singing()
-                self.show_speech("노래를 멈췄어요! 🔇")
+                self.show_speech("노래를 멈췄어! 🔇")
             else:
                 tts_status = self.tts_handler.toggle_tts()
                 if tts_status:
-                    self.show_speech("소리를 다시 켤게요! 🔊")
+                    self.show_speech("소리를 다시 켤게! 🔊")
                 else:
-                    self.show_speech("조용히 할게요! 🔇")
-            return
-        elif "빨리" in text_lower and "말해" in text_lower:
-            self.tts_handler.set_voice_speed(300)
-            self.show_speech_with_tts("빨리 말할게요!")
-            return
-        elif "천천히" in text_lower and "말해" in text_lower:
-            self.tts_handler.set_voice_speed(150)
-            self.show_speech_with_tts("천천히 말할게요!")
+                    self.show_speech("조용히 할게! 🔇")
             return
         elif "발자국" in text_lower:
             self.current_effect_type = "footprint"
-            self.show_speech_with_tts("발자국 이펙트로 바꿨어요!")
+            self.show_speech_with_tts("발자국 이펙트로 바꿨어!")
             return
         elif "먼지" in text_lower or "티끌" in text_lower:
             self.current_effect_type = "dust"
-            self.show_speech_with_tts("먼지 이펙트로 바꿨어요!")
+            self.show_speech_with_tts("먼지 이펙트로 바꿨어!")
             return
         elif "반짝" in text_lower or "별" in text_lower:
             self.current_effect_type = "sparkle"
-            self.show_speech_with_tts("반짝이 이펙트로 바꿨어요!")
+            self.show_speech_with_tts("반짝이 이펙트로 바꿨어!")
             return
         
         # ChatGPT를 통한 일반 대화
@@ -826,25 +900,30 @@ class DesktopCharacter(QWidget):
             self.is_chatgpt_responding = True
             self.speech_timer.stop()  # 자동 인사 타이머 중지
             
-            # macOS 효과음 재생 (TTS 대신)
-            self.tts_handler.play_system_sound("Glass")  # 또는 "Ping", "Pop", "Purr" 등
             self.show_speech("🤔")  # 간단한 이모티콘만 표시
             self.chatgpt_handler.get_response_async(text)
         else:
             default_responses = [
-                "네, 알겠어요!",
-                "흥미로운 이야기네요!",
-                "그렇군요!",
-                "더 이야기해주세요!",
-                "재미있어요!"
+                "네, 알겠어!",
+                "흥미로운 이야기네!",
+                "그렇구나!",
+                "더 이야기해줘!",
+                "재미있어!"
             ]
             response = random.choice(default_responses)
             self.show_speech_with_tts(response)
 
+    def change_voice(self, voice_name):
+        """음성 변경"""
+        if self.tts_handler.set_voice(voice_name):
+            self.show_speech_with_tts(f"{voice_name} 목소리로 바꿨어!")
+        else:
+            self.show_speech_with_tts("그 목소리는 없어!")
+
     def start_random_song(self):
         """랜덤 노래 시작"""
         if self.is_singing:
-            self.show_speech_with_tts("이미 노래하고 있어요! 먼저 멈춰주세요!")
+            self.show_speech_with_tts("이미 노래하고 있어! 먼저 멈춰줘!")
             return
             
         song = self.song_database.get_random_song()
@@ -853,7 +932,7 @@ class DesktopCharacter(QWidget):
     def start_song_by_genre(self, genre):
         """장르별 노래 시작"""
         if self.is_singing:
-            self.show_speech_with_tts("이미 노래하고 있어요! 먼저 멈춰주세요!")
+            self.show_speech_with_tts("이미 노래하고 있어! 먼저 멈춰줘!")
             return
             
         song = self.song_database.get_random_song(genre)
@@ -1183,7 +1262,7 @@ class DesktopCharacter(QWidget):
             return
             
         self.stop_current_speech()
-        messages = ["저랑 대화해볼래요?", "뭔가 재미있는 이야기 없나요?", "안녕하세요!", "노래 불러드릴까요? 🎵"]
+        messages = ["나랑 대화해볼래?", "뭔가 재미있는 이야기 없나?", "안녕!", "노래 불러드릴까? 🎵"]
         message = random.choice(messages)
         self.show_speech_with_tts(message)
 
@@ -1195,7 +1274,7 @@ class DesktopCharacter(QWidget):
         if self.is_singing:
             self.stop_singing()
 
-        messages = ["으아아악!", "이거 놔요!"]
+        messages = ["으아아악!", "이거 놔!"]
         message = random.choice(messages)
 
         bubble = SpeechBubble(message, self, self.scale_factor)
@@ -1315,6 +1394,22 @@ class DesktopCharacter(QWidget):
             birthday_action.triggered.connect(lambda: self.start_singing(self.song_database.search_song("happy birthday")))
 
         menu.addSeparator()
+        
+        # 음성 변경 메뉴 추가
+        voice_menu = menu.addMenu("🎤 음성 변경")
+        bella_action = voice_menu.addAction("Bella (기본 - 귀여운)")
+        bella_action.triggered.connect(lambda: self.change_voice("Bella"))
+        
+        elli_action = voice_menu.addAction("Elli (부드러운)")
+        elli_action.triggered.connect(lambda: self.change_voice("Elli"))
+        
+        rachel_action = voice_menu.addAction("Rachel (자연스러운)")
+        rachel_action.triggered.connect(lambda: self.change_voice("Rachel"))
+        
+        domi_action = voice_menu.addAction("Domi (활기찬)")
+        domi_action.triggered.connect(lambda: self.change_voice("Domi"))
+
+        menu.addSeparator()
         bigger_action = menu.addAction("크게 만들기 🔍+")
         bigger_action.triggered.connect(self.scale_up)
         
@@ -1346,15 +1441,6 @@ class DesktopCharacter(QWidget):
         else:
             tts_action = menu.addAction("🔇 소리 켜기")
             tts_action.triggered.connect(lambda: self.toggle_tts_and_notify())
-        
-        # 말하기 속도 조절
-        speed_menu = menu.addMenu("🗣️ 말하기 속도")
-        slow_action = speed_menu.addAction("천천히")
-        slow_action.triggered.connect(lambda: self.set_speech_speed(150))
-        normal_action = speed_menu.addAction("보통")
-        normal_action.triggered.connect(lambda: self.set_speech_speed(200))
-        fast_action = speed_menu.addAction("빠르게")
-        fast_action.triggered.connect(lambda: self.set_speech_speed(300))
 
         menu.addSeparator()
         # 현재 상태 표시
@@ -1365,6 +1451,15 @@ class DesktopCharacter(QWidget):
         }
         effect_status = menu.addAction(f"현재 이펙트: {current_effect_text[self.current_effect_type]}")
         effect_status.setEnabled(False)
+        
+        # 현재 음성 표시
+        current_voice = "Bella"  # 기본값
+        for voice_name, voice_id in CUTE_GIRL_VOICES.items():
+            if voice_id == self.tts_handler.voice_id:
+                current_voice = voice_name
+                break
+        voice_status = menu.addAction(f"현재 음성: {current_voice}")
+        voice_status.setEnabled(False)
         
         # 노래 상태 표시
         if self.is_singing:
@@ -1383,11 +1478,11 @@ class DesktopCharacter(QWidget):
             status_action.setEnabled(False)
             
         # TTS 상태 표시
-        if self.tts_handler.is_macos:
-            tts_status_action = menu.addAction("🎵 macOS TTS 사용 가능")
+        if self.tts_handler.api_key:
+            tts_status_action = menu.addAction("🎤 Eleven Labs TTS 연결됨")
             tts_status_action.setEnabled(False)
         else:
-            tts_status_action = menu.addAction("⚠️ TTS 제한됨 (macOS 아님)")
+            tts_status_action = menu.addAction("⚠️ Eleven Labs API 키 필요")
             tts_status_action.setEnabled(False)
 
         menu.addSeparator()
@@ -1404,25 +1499,15 @@ class DesktopCharacter(QWidget):
             "dust": "먼지 이펙트", 
             "sparkle": "반짝이 이펙트"
         }
-        self.show_speech_with_tts(f"{effect_names[effect_type]}로 바꿨어요!")
+        self.show_speech_with_tts(f"{effect_names[effect_type]}로 바꿨어!")
 
     def toggle_tts_and_notify(self):
         """TTS 토글하고 알림"""
         tts_status = self.tts_handler.toggle_tts()
         if tts_status:
-            self.show_speech_with_tts("소리를 다시 켤게요!")
+            self.show_speech_with_tts("소리를 다시 켤게!")
         else:
-            self.show_speech("조용히 할게요! 🔇")
-
-    def set_speech_speed(self, speed):
-        """말하기 속도 설정하고 테스트"""
-        self.tts_handler.set_voice_speed(speed)
-        if speed == 150:
-            self.show_speech_with_tts("천천히 말할게요")
-        elif speed == 200:
-            self.show_speech_with_tts("보통 속도로 말할게요")
-        elif speed == 300:
-            self.show_speech_with_tts("빠르게 말할게요")
+            self.show_speech("조용히 할게! 🔇")
 
     def closeEvent(self, event):
         """프로그램 종료시 음성 인식과 TTS 중지"""
@@ -1540,10 +1625,7 @@ if __name__ == "__main__":
     app.setQuitOnLastWindowClosed(False)
 
     # 운영체제 확인
-    if platform.system() == "Darwin":
-        print("✅ macOS 감지됨 - TTS 기능이 완전히 지원됩니다.")
-    else:
-        print(f"⚠️  {platform.system()} 감지됨 - TTS 기능이 제한될 수 있습니다.")
+    print(f"🖥️  운영체제: {platform.system()}")
 
     # 필요한 라이브러리 확인
     try:
@@ -1552,6 +1634,13 @@ if __name__ == "__main__":
     except ImportError:
         print("❌ speech_recognition 라이브러리를 설치해주세요: pip install SpeechRecognition")
         print("❌ 또한 pyaudio도 필요합니다: pip install pyaudio")
+        sys.exit(1)
+
+    try:
+        import requests
+        print("✅ requests 라이브러리가 설치되어 있습니다.")
+    except ImportError:
+        print("❌ requests 라이브러리를 설치해주세요: pip install requests")
         sys.exit(1)
 
     # OpenAI 라이브러리 상태 출력
@@ -1567,7 +1656,24 @@ if __name__ == "__main__":
         print("⚠️  OpenAI 라이브러리가 설치되지 않았습니다.")
         print("   pip install openai 로 설치하면 ChatGPT 기능을 사용할 수 있습니다.")
 
-    print("\n🎵 새로운 노래 기능:")
+    # Eleven Labs API 키 확인
+    if ELEVENLABS_API_KEY:
+        print("✅ Eleven Labs API 키가 설정되어 있습니다.")
+        print("🎤 귀여운 여자아이 목소리로 TTS가 작동합니다!")
+    else:
+        print("⚠️  Eleven Labs API 키가 설정되지 않았습니다.")
+        print("   환경변수 ELEVENLABS_API_KEY를 설정해주세요.")
+        print("   https://elevenlabs.io 에서 API 키를 발급받을 수 있습니다.")
+
+    print("\n🎤 Eleven Labs TTS 기능:")
+    print("• Bella - 기본 귀여운 여자아이 목소리")
+    print("• Elli - 부드럽고 따뜻한 여성 목소리")
+    print("• Rachel - 자연스러운 여성 목소리")
+    print("• Domi - 활기찬 여성 목소리")
+    print("• 음성으로 '벨라 목소리로', '엘리 목소리로' 등으로 변경 가능")
+    print("• 우클릭 메뉴에서도 음성 변경 가능")
+    
+    print("\n🎵 노래 기능:")
     print("• 음성으로 '노래 불러줘', '동요 불러줘', '아리랑 불러줘' 등 요청 가능")
     print("• 우클릭 메뉴에서 노래 선택 및 제어 가능")
     print("• 노래할 때 음표 이펙트와 특별한 애니메이션")
@@ -1576,7 +1682,6 @@ if __name__ == "__main__":
     
     print("\n🎮 기존 기능:")
     print("• ChatGPT 대화 (OpenAI API 키 필요)")
-    print("• macOS TTS 음성 출력")
     print("• 음성 명령 인식")
     print("• 걸어다니기 이펙트 (발자국, 먼지, 반짝이)")
     print("• 크기 조절, 움직임 제어")
@@ -1591,9 +1696,16 @@ if __name__ == "__main__":
     print("• '동요 불러줘' - 동요 중 랜덤")
     print("• '작은별 불러줘' - 특정 노래")
     print("• '노래 멈춰' - 노래 중지")
+    print("• '벨라 목소리로' - 음성 변경")
     print("• '크게' / '작게' - 크기 조절")
     print("• '멈춰' / '움직여' - 움직임 제어")
     print("• '조용' - TTS 끄기/켜기")
+
+    print("\n🔧 필요한 설정:")
+    print("1. Eleven Labs 계정 생성 및 API 키 발급")
+    print("2. 환경변수 ELEVENLABS_API_KEY 설정")
+    print("3. OpenAI API 키 (ChatGPT 기능용, 선택사항)")
+    print("4. 마이크 권한 허용 (음성 인식용)")
 
     character = DesktopCharacter()
     character.show()
@@ -1605,7 +1717,7 @@ if __name__ == "__main__":
         except:
             tray_icon.setIcon(app.style().standardIcon(app.style().SP_ComputerIcon))
 
-        tray_icon.setToolTip("데스크탑 캐릭터 (ChatGPT + TTS + 노래 + 이펙트)")
+        tray_icon.setToolTip("데스크탑 캐릭터 (ChatGPT + Eleven Labs TTS + 노래 + 이펙트)")
         tray_menu = QMenu()
         show_action = tray_menu.addAction("캐릭터 보이기")
         show_action.triggered.connect(character.show)
