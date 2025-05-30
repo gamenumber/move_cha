@@ -565,12 +565,12 @@ class SafeTTSHandler(QObject):
             self.voice_recognizer.set_tts_state(True, text)
             
             settings = {
-                "stability": 0.6 if is_singing else 0.5,
-                "similarity_boost": 0.7 if is_singing else 0.6,
-                "style": 0.4 if is_singing else 0.2,
-                "use_speaker_boost": False
+                "stability": 0.8,                              # 항상 최대
+                "similarity_boost": 0.8,                       # 항상 최대
+                "style": 1.0 if is_singing else 0.8,          # 노래시 최대, 일반 대화시 약간 낮게
+                "use_speaker_boost": True                      # 스피커 부스트 활성화
             }
-            
+                
             headers = {
                 "Accept": "audio/mpeg", 
                 "Content-Type": "application/json",
