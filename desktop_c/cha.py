@@ -6,6 +6,7 @@ import threading
 import subprocess
 import speech_recognition as sr
 import math
+import time
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QMenu, QSystemTrayIcon
 from PyQt5.QtCore import Qt, QTimer, QPoint, pyqtSignal, QObject, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
 from PyQt5.QtGui import QPixmap, QFont, QPainter, QColor, QTransform, QIcon, QPen, QBrush, QRadialGradient
@@ -21,6 +22,71 @@ except ImportError:
 if platform.system() == "Windows":
     import ctypes
     ctypes.windll.kernel32.SetThreadExecutionState(0x80000002)
+
+class MusicNote(QWidget):
+    """노래할 때 나타나는 음표 이펙트"""
+    
+    def __init__(self, x, y, note_type="♪"):
+        super().__init__()
+        self.note_type = note_type
+        self.opacity = 1.0
+        self.x_pos = x
+        self.y_pos = y
+        self.dx = random.uniform(-1, 1)
+        self.dy = random.uniform(-2, -0.5)
+        self.rotation = 0
+        self.rotation_speed = random.uniform(-5, 5)
+        
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedSize(40, 40)
+        
+        self.move(x - 20, y - 20)
+        
+        # 애니메이션 타이머
+        self.animation_timer = QTimer()
+        self.animation_timer.timeout.connect(self.update_note)
+        self.animation_timer.start(50)
+        
+        # 자동 삭제 타이머
+        QTimer.singleShot(3000, self.deleteLater)
+        
+    def update_note(self):
+        self.x_pos += self.dx
+        self.y_pos += self.dy
+        self.dy += 0.05  # 약간의 중력
+        self.rotation += self.rotation_speed
+        self.opacity -= 0.01
+        
+        if self.opacity <= 0:
+            self.animation_timer.stop()
+            self.deleteLater()
+            return
+            
+        self.move(int(self.x_pos - 20), int(self.y_pos - 20))
+        self.update()
+    
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.translate(20, 20)
+        painter.rotate(self.rotation)
+        
+        # 음표 색상 (여러 색상 중 랜덤)
+        colors = [
+            QColor(255, 100, 150, int(255 * self.opacity)),  # 핑크
+            QColor(100, 150, 255, int(255 * self.opacity)),  # 파랑
+            QColor(150, 255, 100, int(255 * self.opacity)),  # 연두
+            QColor(255, 200, 100, int(255 * self.opacity)),  # 주황
+            QColor(200, 100, 255, int(255 * self.opacity)),  # 보라
+        ]
+        color = random.choice(colors)
+        
+        font = QFont("Arial", 20, QFont.Bold)
+        painter.setFont(font)
+        painter.setPen(QPen(color, 2))
+        painter.drawText(-10, 5, self.note_type)
+
 
 class WalkingEffect(QWidget):
     """걸어다닐 때 나타나는 이펙트"""
@@ -158,6 +224,7 @@ class WalkingEffect(QWidget):
                 
                 painter.restore()
 
+
 class TTSHandler(QObject):
     """macOS TTS를 처리하는 클래스"""
     tts_finished = pyqtSignal()  # TTS 완료 시그널 추가
@@ -169,18 +236,21 @@ class TTSHandler(QObject):
         self.voice = "Yuna"  # 한국어 음성 (없으면 기본 음성 사용)
         self.speech_rate = "200"  # 말하기 속도 (단어/분)
         self.is_speaking = False  # TTS 상태 추가
+        self.is_singing = False  # 노래 모드 추가
         
-    def speak(self, text):
+    def speak(self, text, is_singing=False):
         """텍스트를 음성으로 출력"""
         if not self.tts_enabled:
             return
             
         self.is_speaking = True
+        self.is_singing = is_singing
         if self.is_macos:
-            self.speak_macos(text)
+            self.speak_macos(text, is_singing)
         else:
             print(f"[TTS 지원되지 않음] {text}")
             self.is_speaking = False
+            self.is_singing = False
             self.tts_finished.emit()
     
     def play_system_sound(self, sound_name="Glass"):
@@ -204,7 +274,7 @@ class TTSHandler(QObject):
         thread.daemon = True
         thread.start()
     
-    def speak_macos(self, text):
+    def speak_macos(self, text, is_singing=False):
         """macOS에서 say 명령어로 TTS 실행"""
         def speak_worker():
             try:
@@ -224,7 +294,13 @@ class TTSHandler(QObject):
                 except:
                     pass
                 
-                cmd.extend(["-r", self.speech_rate])
+                # 노래 모드일 때는 속도와 피치 조정
+                if is_singing:
+                    cmd.extend(["-r", "150"])  # 느리게
+                    # macOS에서는 피치 조정이 제한적이지만 시도
+                else:
+                    cmd.extend(["-r", self.speech_rate])
+                
                 cmd.append(text)
                 subprocess.run(cmd, check=True)
                 
@@ -234,6 +310,7 @@ class TTSHandler(QObject):
                 print(f"TTS 오류: {e}")
             finally:
                 self.is_speaking = False
+                self.is_singing = False
                 self.tts_finished.emit()
         
         thread = threading.Thread(target=speak_worker)
@@ -248,6 +325,7 @@ class TTSHandler(QObject):
             except:
                 pass
         self.is_speaking = False
+        self.is_singing = False
     
     def set_voice_speed(self, speed):
         """말하기 속도 설정 (100-300 권장)"""
@@ -257,6 +335,89 @@ class TTSHandler(QObject):
         """TTS 켜기/끄기"""
         self.tts_enabled = not self.tts_enabled
         return self.tts_enabled
+
+
+class SongDatabase:
+    """노래 데이터베이스"""
+    
+    def __init__(self):
+        self.songs = {
+            "동요": [
+                {
+                    "title": "작은별",
+                    "lyrics": "반짝반짝 작은별 ~ 아름답게 비치네 ~ 서쪽하늘 높이떠서 ~ 아름답게 비치네 ~",
+                    "tempo": "slow"
+                },
+                {
+                    "title": "곰 세마리",
+                    "lyrics": "곰 세마리가 한집에 있어 ~ 아빠곰 엄마곰 애기곰 ~ 아빠곰은 뚱뚱해 ~ 엄마곰은 날씬해 ~ 애기곰은 너무 귀여워 ~",
+                    "tempo": "medium"
+                },
+                {
+                    "title": "학교종",
+                    "lyrics": "학교종이 땡땡땡 ~ 어서모이자 ~ 선생님이 우리를 ~ 기다리신다 ~",
+                    "tempo": "fast"
+                },
+                {
+                    "title": "산토끼",
+                    "lyrics": "산토끼 토끼야 ~ 어디를 가느냐 ~ 깡총깡총 뛰면서 ~ 어디를 가느냐 ~",
+                    "tempo": "fast"
+                }
+            ],
+            "가요": [
+                {
+                    "title": "아리랑",
+                    "lyrics": "아리랑 아리랑 아라리요 ~ 아리랑 고개로 넘어간다 ~ 나를 버리고 가시는 님은 ~ 십리도 못가서 발병난다 ~",
+                    "tempo": "slow"
+                },
+                {
+                    "title": "도라지",
+                    "lyrics": "도라지 도라지 백도라지 ~ 심심산천에 백도라지 ~ 한두뿌리만 캐어도 ~ 대바구니 넘는다 ~",
+                    "tempo": "medium"
+                },
+                {
+                    "title": "고향의 봄",
+                    "lyrics": "나의 살던 고향은 ~ 꽃피는 산골 ~ 복숭아꽃 살구꽃 ~ 아기진달래 ~",
+                    "tempo": "slow"
+                }
+            ],
+            "팝송": [
+                {
+                    "title": "Happy Birthday",
+                    "lyrics": "Happy birthday to you ~ Happy birthday to you ~ Happy birthday dear friend ~ Happy birthday to you ~",
+                    "tempo": "medium"
+                },
+                {
+                    "title": "Mary Had a Little Lamb",
+                    "lyrics": "Mary had a little lamb ~ Its fleece was white as snow ~ And everywhere that Mary went ~ The lamb was sure to go ~",
+                    "tempo": "medium"
+                }
+            ]
+        }
+    
+    def get_random_song(self, genre=None):
+        """랜덤 노래 가져오기"""
+        if genre and genre in self.songs:
+            return random.choice(self.songs[genre])
+        else:
+            all_songs = []
+            for genre_songs in self.songs.values():
+                all_songs.extend(genre_songs)
+            return random.choice(all_songs)
+    
+    def search_song(self, keyword):
+        """키워드로 노래 검색"""
+        keyword = keyword.lower()
+        for genre, songs in self.songs.items():
+            for song in songs:
+                if keyword in song["title"].lower() or keyword in song["lyrics"].lower():
+                    return song
+        return None
+    
+    def get_all_genres(self):
+        """모든 장르 목록 반환"""
+        return list(self.songs.keys())
+
 
 class ChatGPTHandler(QObject):
     """ChatGPT API를 처리하는 클래스"""
@@ -299,7 +460,8 @@ class ChatGPTHandler(QObject):
             - 이모티콘 적절히 사용
             - 한국어로 대답
             - 데스크탑에서 함께 지내는 친구 같은 느낌
-            - TTS로 읽히기 때문에 너무 복잡한 기호나 이모티콘은 피하기"""
+            - TTS로 읽히기 때문에 너무 복잡한 기호나 이모티콘은 피하기
+            - 노래와 관련된 요청이 있으면 기꺼이 도와주기"""
             
             response = self.client.chat.completions.create(
                 model="gpt-3.5-turbo",
@@ -326,6 +488,7 @@ class ChatGPTHandler(QObject):
         thread = threading.Thread(target=worker)
         thread.daemon = True
         thread.start()
+
 
 class VoiceRecognizer(QObject):
     voice_command = pyqtSignal(str)
@@ -368,6 +531,7 @@ class VoiceRecognizer(QObject):
             except Exception as e:
                 print(f"음성 인식 오류: {e}")
 
+
 class DesktopCharacter(QWidget):
     def __init__(self):
         super().__init__()
@@ -382,6 +546,12 @@ class DesktopCharacter(QWidget):
         
         # ChatGPT 응답 상태 추가
         self.is_chatgpt_responding = False
+        
+        # 노래 관련 변수 추가
+        self.is_singing = False
+        self.music_notes = []
+        self.note_timer = None
+        self.song_database = SongDatabase()
         
         # 이펙트 관련 변수
         self.walking_effects = []
@@ -404,10 +574,18 @@ class DesktopCharacter(QWidget):
     def setup_tts(self):
         """TTS 핸들러 설정"""
         self.tts_handler = TTSHandler()
+        # TTS 완료 시그널 연결
+        self.tts_handler.tts_finished.connect(self.on_tts_finished)
         if self.tts_handler.is_macos:
             print("✅ macOS TTS가 활성화되었습니다.")
         else:
             print("⚠️  macOS가 아니므로 TTS 기능이 제한됩니다.")
+
+    def on_tts_finished(self):
+        """TTS 완료 시 호출"""
+        if self.is_singing:
+            # 노래가 끝나면 노래 모드 종료
+            self.stop_singing()
 
     def setup_chatgpt(self):
         """ChatGPT 핸들러 설정"""
@@ -431,7 +609,7 @@ class DesktopCharacter(QWidget):
     def clean_text_for_tts(self, text):
         """TTS에 적합하도록 텍스트 정리"""
         # 기본 이모티콘들 제거
-        basic_emojis = ['😊', '😄', '😅', '🤔', '🗣️', '🏃‍♀️', '⏸️', '▶️', '🔍', '❌', '👋', '✨', '🔊', '🔇']
+        basic_emojis = ['😊', '😄', '😅', '🤔', '🗣️', '🏃‍♀️', '⏸️', '▶️', '🔍', '❌', '👋', '✨', '🔊', '🔇', '🎵', '🎶', '♪', '♫']
         for emoji in basic_emojis:
             text = text.replace(emoji, '')
         
@@ -446,14 +624,91 @@ class DesktopCharacter(QWidget):
         
         return text if text else ""
 
-    def show_speech_with_tts(self, message):
+    def show_speech_with_tts(self, message, is_singing=False):
         """말풍선과 함께 TTS로 음성 출력"""
         self.tts_handler.stop_speaking()
         self.show_speech(message)
         
         clean_message = self.clean_text_for_tts(message)
         if clean_message:
-            self.tts_handler.speak(clean_message)
+            self.tts_handler.speak(clean_message, is_singing)
+
+    def start_singing(self, song):
+        """노래 시작"""
+        self.is_singing = True
+        self.stop_current_speech()
+        
+        # 노래 제목 먼저 보여주기
+        self.show_speech(f"🎵 {song['title']} 🎵")
+        
+        # 1초 후 노래 시작
+        QTimer.singleShot(1000, lambda: self.sing_song(song))
+        
+        # 음표 이펙트 시작
+        self.start_music_notes()
+        
+        # 노래하는 모드 애니메이션
+        self.set_singing_image()
+
+    def sing_song(self, song):
+        """실제 노래 부르기"""
+        if not self.is_singing:
+            return
+            
+        # 노래 가사를 말풍선으로 보여주고 TTS로 부르기
+        self.show_speech_with_tts(song['lyrics'], is_singing=True)
+
+    def stop_singing(self):
+        """노래 중지"""
+        self.is_singing = False
+        self.stop_music_notes()
+        self.restore_image()
+        
+        # 노래 끝 인사
+        QTimer.singleShot(500, lambda: self.show_speech_with_tts("노래 끝! 어떠셨나요? 🎵"))
+
+    def start_music_notes(self):
+        """음표 이펙트 시작"""
+        if self.note_timer:
+            self.note_timer.stop()
+            
+        self.note_timer = QTimer()
+        self.note_timer.timeout.connect(self.create_music_note)
+        self.note_timer.start(400)  # 400ms마다 음표 생성
+
+    def stop_music_notes(self):
+        """음표 이펙트 중지"""
+        if self.note_timer:
+            self.note_timer.stop()
+            self.note_timer = None
+
+    def create_music_note(self):
+        """음표 생성"""
+        if not self.is_singing:
+            return
+            
+        # 캐릭터 주변에서 음표 생성
+        char_center_x = self.x() + self.width() // 2
+        char_center_y = self.y() + self.height() // 2
+        
+        # 음표 종류 랜덤 선택
+        notes = ["♪", "♫", "♬", "🎵", "🎶"]
+        note_type = random.choice(notes)
+        
+        # 캐릭터 주변에서 랜덤 위치
+        offset_x = random.randint(-30, 30)
+        offset_y = random.randint(-20, 10)
+        
+        note_x = char_center_x + offset_x
+        note_y = char_center_y + offset_y
+        
+        # 음표 생성
+        note = MusicNote(note_x, note_y, note_type)
+        note.show()
+        self.music_notes.append(note)
+        
+        # 오래된 음표 정리 (메모리 절약)
+        self.music_notes = [n for n in self.music_notes if n and not n.isHidden()]
 
     def handle_voice_command(self, text):
         """음성 명령 처리"""
@@ -465,6 +720,54 @@ class DesktopCharacter(QWidget):
             if not any(cmd in text_lower for cmd in urgent_commands):
                 return
         
+        # 노래 관련 명령어 처리
+        if "노래" in text_lower:
+            if "멈춰" in text_lower or "그만" in text_lower or "중지" in text_lower:
+                if self.is_singing:
+                    self.stop_singing()
+                    self.show_speech_with_tts("노래를 멈췄어요!")
+                    return
+                else:
+                    self.show_speech_with_tts("지금 노래하고 있지 않아요!")
+                    return
+            elif "불러" in text_lower or "해줘" in text_lower or "부탁" in text_lower:
+                self.start_random_song()
+                return
+            elif "동요" in text_lower:
+                self.start_song_by_genre("동요")
+                return
+            elif "가요" in text_lower or "민요" in text_lower:
+                self.start_song_by_genre("가요")
+                return
+            elif "팝송" in text_lower or "영어" in text_lower:
+                self.start_song_by_genre("팝송")
+                return
+            elif "작은별" in text_lower:
+                song = self.song_database.search_song("작은별")
+                if song:
+                    self.start_singing(song)
+                    return
+            elif "곰" in text_lower and "세마리" in text_lower:
+                song = self.song_database.search_song("곰 세마리")
+                if song:
+                    self.start_singing(song)
+                    return
+            elif "아리랑" in text_lower:
+                song = self.song_database.search_song("아리랑")
+                if song:
+                    self.start_singing(song)
+                    return
+            elif "생일" in text_lower or "birthday" in text_lower:
+                song = self.song_database.search_song("happy birthday")
+                if song:
+                    self.start_singing(song)
+                    return
+            else:
+                # 일반적인 노래 요청
+                self.start_random_song()
+                return
+        
+        # 기존 명령어들
         if "커" in text_lower or "크게" in text_lower:
             self.scale_up()
             self.show_speech_with_tts("커졌어요!")
@@ -474,19 +777,27 @@ class DesktopCharacter(QWidget):
             self.show_speech_with_tts("작아졌어요!")
             return
         elif "멈춰" in text_lower or "정지" in text_lower:
-            self.pause_movement()
-            self.show_speech_with_tts("멈췄어요!")
+            if self.is_singing:
+                self.stop_singing()
+                self.show_speech_with_tts("노래를 멈췄어요!")
+            else:
+                self.pause_movement()
+                self.show_speech_with_tts("멈췄어요!")
             return
         elif "움직여" in text_lower or "돌아다녀" in text_lower:
             self.resume_movement()
             self.show_speech_with_tts("다시 움직일게요!")
             return
         elif "조용" in text_lower or "음소거" in text_lower:
-            tts_status = self.tts_handler.toggle_tts()
-            if tts_status:
-                self.show_speech("소리를 다시 켤게요! 🔊")
+            if self.is_singing:
+                self.stop_singing()
+                self.show_speech("노래를 멈췄어요! 🔇")
             else:
-                self.show_speech("조용히 할게요! 🔇")
+                tts_status = self.tts_handler.toggle_tts()
+                if tts_status:
+                    self.show_speech("소리를 다시 켤게요! 🔊")
+                else:
+                    self.show_speech("조용히 할게요! 🔇")
             return
         elif "빨리" in text_lower and "말해" in text_lower:
             self.tts_handler.set_voice_speed(300)
@@ -529,6 +840,24 @@ class DesktopCharacter(QWidget):
             ]
             response = random.choice(default_responses)
             self.show_speech_with_tts(response)
+
+    def start_random_song(self):
+        """랜덤 노래 시작"""
+        if self.is_singing:
+            self.show_speech_with_tts("이미 노래하고 있어요! 먼저 멈춰주세요!")
+            return
+            
+        song = self.song_database.get_random_song()
+        self.start_singing(song)
+
+    def start_song_by_genre(self, genre):
+        """장르별 노래 시작"""
+        if self.is_singing:
+            self.show_speech_with_tts("이미 노래하고 있어요! 먼저 멈춰주세요!")
+            return
+            
+        song = self.song_database.get_random_song(genre)
+        self.start_singing(song)
 
     def handle_chatgpt_response(self, response):
         """ChatGPT 응답 처리"""
@@ -749,6 +1078,49 @@ class DesktopCharacter(QWidget):
         else:
             self.label.setText("😺")
 
+    def set_singing_image(self):
+        """노래할 때 이미지 설정"""
+        if self.has_image:
+            frames = []
+            current_size = int(self.base_image_size * self.scale_factor)
+            # 노래용 프레임들 (있다면 사용, 없으면 말하기 프레임 사용)
+            for file in ["sing1.png", "sing2.png"]:
+                pixmap = QPixmap(file)
+                if not pixmap.isNull():
+                    pixmap = pixmap.scaled(current_size, current_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    if not self.facing_right:
+                        pixmap = pixmap.transformed(QTransform().scale(-1, 1))
+                    frames.append(pixmap)
+            
+            # 노래 이미지가 없으면 말하기 이미지 사용
+            if not frames:
+                for file in ["h1.png", "h2.png"]:
+                    pixmap = QPixmap(file)
+                    if not pixmap.isNull():
+                        pixmap = pixmap.scaled(current_size, current_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        if not self.facing_right:
+                            pixmap = pixmap.transformed(QTransform().scale(-1, 1))
+                        frames.append(pixmap)
+
+            if frames:
+                self.speaking_frames = frames
+                self.current_frame_index = 0
+                self.animation_timer = QTimer(self)
+                self.animation_timer.timeout.connect(self.animate_speaking)
+                self.animation_timer.start(150)  # 노래할 때는 조금 더 빠르게
+            else:
+                self.set_static_speaking_image()
+        else:
+            self.label.setText("🎵")
+
+    def set_static_speaking_image(self):
+        """정적 말하기 이미지 설정"""
+        if self.has_image:
+            pixmap = self.speaking_pixmap
+            if not self.facing_right:
+                pixmap = pixmap.transformed(QTransform().scale(-1, 1))
+            self.label.setPixmap(pixmap)
+
     def animate_speaking(self):
         if hasattr(self, "speaking_frames") and self.speaking_frames:
             self.label.setPixmap(self.speaking_frames[self.current_frame_index])
@@ -806,18 +1178,22 @@ class DesktopCharacter(QWidget):
             self.current_bubble = None
 
     def say_hello(self):
-        """자동 인사 - ChatGPT 응답 중이면 건너뛰기"""
-        if self.is_dragging or self.is_chatgpt_responding:
+        """자동 인사 - ChatGPT 응답 중이거나 노래 중이면 건너뛰기"""
+        if self.is_dragging or self.is_chatgpt_responding or self.is_singing:
             return
             
         self.stop_current_speech()
-        messages = ["저랑 대화해볼래요?", "뭔가 재미있는 이야기 없나요?", "안녕하세요!"]
+        messages = ["저랑 대화해볼래요?", "뭔가 재미있는 이야기 없나요?", "안녕하세요!", "노래 불러드릴까요? 🎵"]
         message = random.choice(messages)
         self.show_speech_with_tts(message)
 
     def say_grabbed_message(self):
         self.stop_current_speech()
         self.tts_handler.stop_speaking()
+        
+        # 노래 중이면 노래도 중지
+        if self.is_singing:
+            self.stop_singing()
 
         messages = ["으아아악!", "이거 놔요!"]
         message = random.choice(messages)
@@ -868,8 +1244,8 @@ class DesktopCharacter(QWidget):
             self.move(new_x, new_y)
 
     def mouseDoubleClickEvent(self, event):
-        """더블클릭 시에도 ChatGPT 응답 중이면 무시"""
-        if not self.is_dragging and not self.is_chatgpt_responding:
+        """더블클릭 시에도 ChatGPT 응답 중이거나 노래 중이면 무시"""
+        if not self.is_dragging and not self.is_chatgpt_responding and not self.is_singing:
             self.say_hello()
 
     def end_drag(self):
@@ -902,6 +1278,41 @@ class DesktopCharacter(QWidget):
 
         hello_action = menu.addAction("안녕! 👋")
         hello_action.triggered.connect(self.say_hello)
+
+        menu.addSeparator()
+        
+        # 노래 메뉴 추가
+        song_menu = menu.addMenu("🎵 노래")
+        if self.is_singing:
+            stop_song_action = song_menu.addAction("노래 멈추기")
+            stop_song_action.triggered.connect(self.stop_singing)
+        else:
+            random_song_action = song_menu.addAction("랜덤 노래")
+            random_song_action.triggered.connect(self.start_random_song)
+            
+            song_menu.addSeparator()
+            dongyo_action = song_menu.addAction("동요 부르기")
+            dongyo_action.triggered.connect(lambda: self.start_song_by_genre("동요"))
+            
+            gayo_action = song_menu.addAction("가요 부르기")
+            gayo_action.triggered.connect(lambda: self.start_song_by_genre("가요"))
+            
+            pop_action = song_menu.addAction("팝송 부르기")
+            pop_action.triggered.connect(lambda: self.start_song_by_genre("팝송"))
+            
+            song_menu.addSeparator()
+            # 특정 노래들
+            twinkle_action = song_menu.addAction("작은별")
+            twinkle_action.triggered.connect(lambda: self.start_singing(self.song_database.search_song("작은별")))
+            
+            bear_action = song_menu.addAction("곰 세마리")
+            bear_action.triggered.connect(lambda: self.start_singing(self.song_database.search_song("곰 세마리")))
+            
+            arirang_action = song_menu.addAction("아리랑")
+            arirang_action.triggered.connect(lambda: self.start_singing(self.song_database.search_song("아리랑")))
+            
+            birthday_action = song_menu.addAction("생일축하")
+            birthday_action.triggered.connect(lambda: self.start_singing(self.song_database.search_song("happy birthday")))
 
         menu.addSeparator()
         bigger_action = menu.addAction("크게 만들기 🔍+")
@@ -946,7 +1357,7 @@ class DesktopCharacter(QWidget):
         fast_action.triggered.connect(lambda: self.set_speech_speed(300))
 
         menu.addSeparator()
-        # 현재 이펙트 타입 표시
+        # 현재 상태 표시
         current_effect_text = {
             "footprint": "👣 발자국",
             "dust": "💨 먼지",
@@ -954,6 +1365,11 @@ class DesktopCharacter(QWidget):
         }
         effect_status = menu.addAction(f"현재 이펙트: {current_effect_text[self.current_effect_type]}")
         effect_status.setEnabled(False)
+        
+        # 노래 상태 표시
+        if self.is_singing:
+            song_status = menu.addAction("🎵 노래 중...")
+            song_status.setEnabled(False)
         
         # ChatGPT 상태 표시
         if self.is_chatgpt_responding:
@@ -1015,13 +1431,24 @@ class DesktopCharacter(QWidget):
         if hasattr(self, 'tts_handler'):
             self.tts_handler.stop_speaking()
         
+        # 노래 중지
+        if self.is_singing:
+            self.stop_singing()
+        
         # 모든 이펙트 정리
         for effect in self.walking_effects:
             if effect:
                 effect.close()
         self.walking_effects.clear()
         
+        # 모든 음표 이펙트 정리
+        for note in self.music_notes:
+            if note:
+                note.close()
+        self.music_notes.clear()
+        
         event.accept()
+
 
 class SpeechBubble(QWidget):
     def __init__(self, message, char_widget, scale_factor=1.0):
@@ -1067,9 +1494,15 @@ class SpeechBubble(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        bubble_color = QColor(240, 255, 245, 240)
-        border_color = QColor(152, 251, 152)
-        shadow_color = QColor(34, 139, 34, 30)
+        # 노래 중일 때는 다른 색상 사용
+        if hasattr(self.char_widget, 'is_singing') and self.char_widget.is_singing:
+            bubble_color = QColor(255, 240, 245, 240)  # 연한 분홍색
+            border_color = QColor(255, 182, 193)  # 분홍색
+            shadow_color = QColor(199, 21, 133, 30)  # 진한 분홍색 그림자
+        else:
+            bubble_color = QColor(240, 255, 245, 240)
+            border_color = QColor(152, 251, 152)
+            shadow_color = QColor(34, 139, 34, 30)
 
         # 동적 크기 계산
         shadow_width = self.width() - 20
@@ -1100,6 +1533,7 @@ class SpeechBubble(QWidget):
         text_rect = self.rect().adjusted(text_margin, text_margin, -text_margin, -text_margin)
         
         painter.drawText(text_rect, Qt.AlignCenter | Qt.TextWordWrap, self.message)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
@@ -1133,16 +1567,33 @@ if __name__ == "__main__":
         print("⚠️  OpenAI 라이브러리가 설치되지 않았습니다.")
         print("   pip install openai 로 설치하면 ChatGPT 기능을 사용할 수 있습니다.")
 
-    print("\n🎮 수정된 기능:")
-    print("• ChatGPT 응답 중에는 자동 인사 중단")
-    print("• ChatGPT 응답 완료 후 자동 인사 재시작")
-    print("• 응답 중 긴급 명령('멈춰', '조용') 외에는 새 음성 명령 무시")
-    print("• 우클릭 메뉴에서 ChatGPT 상태 확인 가능")
+    print("\n🎵 새로운 노래 기능:")
+    print("• 음성으로 '노래 불러줘', '동요 불러줘', '아리랑 불러줘' 등 요청 가능")
+    print("• 우클릭 메뉴에서 노래 선택 및 제어 가능")
+    print("• 노래할 때 음표 이펙트와 특별한 애니메이션")
+    print("• 노래 중에는 자동 인사 중단")
+    print("• '노래 멈춰' 또는 '그만'으로 노래 중지")
     
-    print("\n🎮 이펙트 기능:")
-    print("• 음성으로 '발자국', '먼지', '반짝' 등으로 이펙트 변경 가능")
-    print("• 우클릭 메뉴에서도 이펙트 선택 가능")
-    print("• 걸어다닐 때 이펙트 생성 (드래그 시에는 생성 안됨)")
+    print("\n🎮 기존 기능:")
+    print("• ChatGPT 대화 (OpenAI API 키 필요)")
+    print("• macOS TTS 음성 출력")
+    print("• 음성 명령 인식")
+    print("• 걸어다니기 이펙트 (발자국, 먼지, 반짝이)")
+    print("• 크기 조절, 움직임 제어")
+    
+    print("\n🎵 지원하는 노래:")
+    print("• 동요: 작은별, 곰 세마리, 학교종, 산토끼")
+    print("• 가요: 아리랑, 도라지, 고향의 봄")
+    print("• 팝송: Happy Birthday, Mary Had a Little Lamb")
+
+    print("\n🎤 음성 명령어 예시:")
+    print("• '노래 불러줘' - 랜덤 노래")
+    print("• '동요 불러줘' - 동요 중 랜덤")
+    print("• '작은별 불러줘' - 특정 노래")
+    print("• '노래 멈춰' - 노래 중지")
+    print("• '크게' / '작게' - 크기 조절")
+    print("• '멈춰' / '움직여' - 움직임 제어")
+    print("• '조용' - TTS 끄기/켜기")
 
     character = DesktopCharacter()
     character.show()
@@ -1154,7 +1605,7 @@ if __name__ == "__main__":
         except:
             tray_icon.setIcon(app.style().standardIcon(app.style().SP_ComputerIcon))
 
-        tray_icon.setToolTip("데스크탑 캐릭터 (ChatGPT + TTS + 걸어다니기 이펙트)")
+        tray_icon.setToolTip("데스크탑 캐릭터 (ChatGPT + TTS + 노래 + 이펙트)")
         tray_menu = QMenu()
         show_action = tray_menu.addAction("캐릭터 보이기")
         show_action.triggered.connect(character.show)
