@@ -160,6 +160,7 @@ class WalkingEffect(QWidget):
 
 class TTSHandler(QObject):
     """macOS TTS를 처리하는 클래스"""
+    tts_finished = pyqtSignal()  # TTS 완료 시그널 추가
     
     def __init__(self):
         super().__init__()
@@ -167,16 +168,20 @@ class TTSHandler(QObject):
         self.tts_enabled = True
         self.voice = "Yuna"  # 한국어 음성 (없으면 기본 음성 사용)
         self.speech_rate = "200"  # 말하기 속도 (단어/분)
+        self.is_speaking = False  # TTS 상태 추가
         
     def speak(self, text):
         """텍스트를 음성으로 출력"""
         if not self.tts_enabled:
             return
             
+        self.is_speaking = True
         if self.is_macos:
             self.speak_macos(text)
         else:
             print(f"[TTS 지원되지 않음] {text}")
+            self.is_speaking = False
+            self.tts_finished.emit()
     
     def play_system_sound(self, sound_name="Glass"):
         """macOS 시스템 효과음 재생"""
@@ -227,6 +232,9 @@ class TTSHandler(QObject):
                 print(f"TTS 실행 오류: {e}")
             except Exception as e:
                 print(f"TTS 오류: {e}")
+            finally:
+                self.is_speaking = False
+                self.tts_finished.emit()
         
         thread = threading.Thread(target=speak_worker)
         thread.daemon = True
@@ -239,6 +247,7 @@ class TTSHandler(QObject):
                 subprocess.run(["killall", "say"], check=False)
             except:
                 pass
+        self.is_speaking = False
     
     def set_voice_speed(self, speed):
         """말하기 속도 설정 (100-300 권장)"""
@@ -371,6 +380,9 @@ class DesktopCharacter(QWidget):
         self.base_bubble_width = 180
         self.base_bubble_height = 60
         
+        # ChatGPT 응답 상태 추가
+        self.is_chatgpt_responding = False
+        
         # 이펙트 관련 변수
         self.walking_effects = []
         self.last_effect_time = 0
@@ -447,6 +459,12 @@ class DesktopCharacter(QWidget):
         """음성 명령 처리"""
         text_lower = text.lower()
         
+        # ChatGPT 응답 중이면 새로운 음성 명령 무시 (긴급 명령 제외)
+        if self.is_chatgpt_responding:
+            urgent_commands = ["멈춰", "정지", "조용"]
+            if not any(cmd in text_lower for cmd in urgent_commands):
+                return
+        
         if "커" in text_lower or "크게" in text_lower:
             self.scale_up()
             self.show_speech_with_tts("커졌어요!")
@@ -493,6 +511,10 @@ class DesktopCharacter(QWidget):
         
         # ChatGPT를 통한 일반 대화
         if self.chatgpt_handler and self.chatgpt_handler.client:
+            # ChatGPT 응답 시작 - 상태 변경 및 타이머 일시정지
+            self.is_chatgpt_responding = True
+            self.speech_timer.stop()  # 자동 인사 타이머 중지
+            
             # macOS 효과음 재생 (TTS 대신)
             self.tts_handler.play_system_sound("Glass")  # 또는 "Ping", "Pop", "Purr" 등
             self.show_speech("🤔")  # 간단한 이모티콘만 표시
@@ -511,6 +533,10 @@ class DesktopCharacter(QWidget):
     def handle_chatgpt_response(self, response):
         """ChatGPT 응답 처리"""
         self.show_speech_with_tts(response)
+        
+        # ChatGPT 응답 완료 - 상태 변경 및 타이머 재시작
+        self.is_chatgpt_responding = False
+        self.speech_timer.start(15000)  # 자동 인사 타이머 재시작
 
     def create_walking_effect(self, x, y):
         """걸을 때 이펙트 생성"""
@@ -743,6 +769,7 @@ class DesktopCharacter(QWidget):
             self.label.setPixmap(pixmap)
 
     def stop_current_speech(self):
+        """현재 말하기 중지 - ChatGPT 응답 중이면 상태도 초기화"""
         if hasattr(self, "animation_timer"):
             self.animation_timer.stop()
             self.animation_timer.deleteLater()
@@ -753,6 +780,11 @@ class DesktopCharacter(QWidget):
         if self.current_bubble:
             self.current_bubble.close()
             self.current_bubble = None
+            
+        # ChatGPT 응답이 중단되면 상태 초기화
+        if self.is_chatgpt_responding:
+            self.is_chatgpt_responding = False
+            self.speech_timer.start(15000)
 
     def show_speech(self, message):
         """말풍선만 보여주기 (TTS 없음)"""
@@ -774,8 +806,10 @@ class DesktopCharacter(QWidget):
             self.current_bubble = None
 
     def say_hello(self):
-        if self.is_dragging:
+        """자동 인사 - ChatGPT 응답 중이면 건너뛰기"""
+        if self.is_dragging or self.is_chatgpt_responding:
             return
+            
         self.stop_current_speech()
         messages = ["저랑 대화해볼래요?", "뭔가 재미있는 이야기 없나요?", "안녕하세요!"]
         message = random.choice(messages)
@@ -834,7 +868,8 @@ class DesktopCharacter(QWidget):
             self.move(new_x, new_y)
 
     def mouseDoubleClickEvent(self, event):
-        if not self.is_dragging:
+        """더블클릭 시에도 ChatGPT 응답 중이면 무시"""
+        if not self.is_dragging and not self.is_chatgpt_responding:
             self.say_hello()
 
     def end_drag(self):
@@ -921,7 +956,10 @@ class DesktopCharacter(QWidget):
         effect_status.setEnabled(False)
         
         # ChatGPT 상태 표시
-        if self.chatgpt_handler and self.chatgpt_handler.client:
+        if self.is_chatgpt_responding:
+            status_action = menu.addAction("🤖 ChatGPT 응답 중...")
+            status_action.setEnabled(False)
+        elif self.chatgpt_handler and self.chatgpt_handler.client:
             status_action = menu.addAction("🤖 ChatGPT 연결됨")
             status_action.setEnabled(False)
         else:
@@ -1095,6 +1133,12 @@ if __name__ == "__main__":
         print("⚠️  OpenAI 라이브러리가 설치되지 않았습니다.")
         print("   pip install openai 로 설치하면 ChatGPT 기능을 사용할 수 있습니다.")
 
+    print("\n🎮 수정된 기능:")
+    print("• ChatGPT 응답 중에는 자동 인사 중단")
+    print("• ChatGPT 응답 완료 후 자동 인사 재시작")
+    print("• 응답 중 긴급 명령('멈춰', '조용') 외에는 새 음성 명령 무시")
+    print("• 우클릭 메뉴에서 ChatGPT 상태 확인 가능")
+    
     print("\n🎮 이펙트 기능:")
     print("• 음성으로 '발자국', '먼지', '반짝' 등으로 이펙트 변경 가능")
     print("• 우클릭 메뉴에서도 이펙트 선택 가능")
